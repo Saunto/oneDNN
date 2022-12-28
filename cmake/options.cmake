@@ -335,3 +335,9 @@ option(DNNL_AARCH64_USE_ACL "Enables use of AArch64 optimised functions
     This is only supported on AArch64 builds and assumes there is a
     functioning Compute Library build available at the location specified by the
     environment variable ACL_ROOT_DIR." OFF)
+
+# ==============================================
+# RISC-V V version
+# ==============================================
+option(DNNL_RV64_USE_VSPEC_0_7 "Enables use of RV64 V ISA specification v0.7.
+    Setting this option to false will use v1.0 instead." OFF)

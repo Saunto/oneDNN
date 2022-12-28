@@ -102,11 +102,11 @@ if(DNNL_WITH_SYCL AND DNNL_CPU_RUNTIME STREQUAL "NONE")
     handle_tbb_target()
 endif()
 
-add_subdirectory(gtests)
+#add_subdirectory(gtests)
 add_subdirectory(benchdnn)
 
 if(NOT DNNL_WITH_SYCL AND NOT DNNL_ENABLE_STACK_CHECKER)
     if(UNIX OR MINGW)
-        add_subdirectory(noexcept)
+        #add_subdirectory(noexcept)
     endif()
 endif()
