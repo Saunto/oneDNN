@@ -1,0 +1,28 @@
+variables:
+  GIT_SOURCES_ATTEMPTS: 4
+
+stages:
+  - build
+
+compile-tests-job:
+  stage: build
+  tags:
+    - rust
+  image:
+    name: registry.gitlab.bsc.es/hwdesign/containerhub/riscv:latest
+  before_script:
+    - source /load_modulefiles_bash.sh
+    - module load rvv
+    - mkdir -p build install
+    - cd build
+    - export CC=riscv64-linux-gnu-gcc
+    - export CXX=riscv64-linux-gnu-g++
+  script:
+    - cmake -DCMAKE_LIBRARY_PATH=/usr/riscv64-linux-gnu/lib/ -DCMAKE_INSTALL_PREFIX=../install -DDNNL_TARGET_ARCH=RV64 -DDNNL_CPU_RUNTIME=OMP -DCMAKE_BUILD_TYPE=RELEASE -DDNNL_BUILD_TESTS=1 -DDNNL_RV64_USE_VSPEC_0_7=1 ..
+    - make install -j
+  artifacts:
+    paths:
+      - install/usr/local
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_REF_NAME == 'riscvv'
