@@ -28,3 +28,6 @@ compile_flags.txt
 compile_commands.json
 .git-blame-ignore-revs
 .profile
+scripts
+tests
+.github/automation
