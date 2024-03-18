@@ -5,7 +5,8 @@
 #include <cstdlib>
 #include <iostream>
 #include <vector>
-
+//#include "riscv_vector.h"
+#include "/home/samjons/thesis/llvm-EPI-development-toolchain-cross/lib/clang/19/include/riscv_vector.h"
 namespace dnnl {
 namespace impl {
 namespace cpu {
@@ -13,68 +14,59 @@ namespace rv64 {
 
 // im2col and col2im comes from Berkeley Vision's Caffe
 // https://github.com/BVLC/caffe/blob/master/LICENSE
+float im2col_get_pixel(const float* im, int height, int width, int channels,
+                        int row, int col, int channel, int pad)
+{
+    row -= pad;
+    col -= pad;
 
+    if (row < 0 || col < 0 || row >= height || col >= width) return 0;
+    return im[col + width * (row + height * channel)];
+}
 // Function to check if 'a' is greater than or equal to zero and less than 'b'
 inline bool is_a_ge_zero_and_a_lt_b(int a, int b) {
   return static_cast<unsigned>(a) < static_cast<unsigned>(b);
 }
 
 template <typename T>
-void im2col_cpu(const T* data_im, const int channels,
-                const int height, const int width, const int kernel_h, const int kernel_w,
-                const int pad_h, const int pad_w,
-                const int stride_h, const int stride_w,
-                T* data_col) {  
-  std::cout << "setting output and channel sizes" << std::endl;
-  const int output_h = (height + 2 * pad_h - kernel_h) / stride_h + 1;
-  const int output_w = (width + 2 * pad_w - kernel_w) / stride_w + 1;
-  const int channel_size = height * width;
-  std::cout << "output_h: " << output_h << std::endl;
-  std::cout << "output_w: " << output_w << std::endl;
-  std::cout << "channel_size: " << channel_size << std::endl;
-  for (int channel = channels; channel--; data_im += channel_size) {
-    std::cout << "channel: " << channel << std::endl;
-    for (int kernel_row = 0; kernel_row < kernel_h; kernel_row++) {
-      std::cout << "kernel_row: " << kernel_row << std::endl;
-      for (int kernel_col = 0; kernel_col < kernel_w; kernel_col++) {
-        std::cout << "kernel_col: " << kernel_col << std::endl;
-        int input_row = -pad_h + kernel_row;
-        std::cout << "input_row: " << input_row << std::endl;
-        for (int output_row = 0; output_row < output_h; output_row++) {
-          if (!is_a_ge_zero_and_a_lt_b(input_row, height)) {
-            for (int output_col = 0; output_col < output_w; output_col++) {
-              std::cout << "output_col: " << output_col << std::endl;
-              //int index = ((channel * kernel_h + kernel_row) * kernel_w + kernel_col) * (output_h * output_w) + (output_row * output_w) + output_col;
-              *(data_col++) = 0; 
-              std::cout << "set data_col to 0" << std::endl;
+void im2col_cpu(const T* data_im, int channels, int height, int width,
+            int ksize, int stride, int pad, T* data_col)
+{
+    int c, h, w;
+    int height_col = (height + 2 * pad - ksize) / stride + 1;
+    int width_col = (width + 2 * pad - ksize) / stride + 1;
+    int channels_col = channels * ksize * ksize;
+    //const int size = ksize * ksize * channels * height * width;
+    int index = 0;
+    const int size = channels_col * height_col * width_col;
+    for (c = 0; c < channels_col; ++c) {
+        int w_offset = c % ksize;
+        int h_offset = (c / ksize) % ksize;
+        int c_im = c / ksize / ksize;
+        for (h = 0; h < height_col; ++h) {
+            #pragma omp parallel for
+            for (w = 0; w < width_col; ++w) {
+                int im_row = h_offset + h * stride;
+                int im_col = w_offset + w * stride;
+                int col_index = (c * height_col + h) * width_col + w;
+                std::cout << "im2col:" << index << "/" << size << " [" << (float)(100*index/size) << "%]" << std::endl;
+                data_col[col_index] = im2col_get_pixel(data_im, height, width, channels,
+                    im_row, im_col, c_im, pad);
+                index++;
             }
-          } else {
-            std::cout << "else" << std::endl;
-            int input_col = -pad_w + kernel_col;
-            std::cout << "input_col: " << input_col << std::endl;
-            for (int output_col = 0; output_col < output_w; output_col++) {
-              if (is_a_ge_zero_and_a_lt_b(input_col, width)) {
-                *(data_col++) = data_im[input_row * width + input_col];
-              } else {
-                *(data_col++) = 0;
-              }
-              input_col += stride_w;
-            }
-          }
-          input_row += stride_h;
         }
-      }
     }
-  }
 }
 
-template <typename T>
+/*
 void col2im_cpu(const T* data_col, const int channels,
                 const int height, const int width, const int kernel_h, const int kernel_w,
                 const int pad_h, const int pad_w,
                 const int stride_h, const int stride_w,
                 T* data_im) {
   std::fill_n(data_im, height * width * channels, T(0)); // Initializes or resets data_im to zeros
+  int index = 0;
+  const int size = kernel_h * kernel_w * channels * height * width;
   const int output_h = (height + 2 * pad_h - kernel_h) / stride_h + 1;
   const int output_w = (width + 2 * pad_w - kernel_w) / stride_w + 1;
   const int channel_size = height * width;
@@ -83,15 +75,20 @@ void col2im_cpu(const T* data_col, const int channels,
       for (int kernel_col = 0; kernel_col < kernel_w; kernel_col++) {
         int input_row = -pad_h + kernel_row;
         for (int output_row = 0; output_row < output_h; output_row++) {
+
           if (!is_a_ge_zero_and_a_lt_b(input_row, height)) {
             data_col += output_w; // Skip the entire row in the column buffer if out of bounds
+            index += output_w;
           } else {
             int input_col = -pad_w + kernel_col;
+            #pragma omp parallel for
             for (int output_col = 0; output_col < output_w; output_col++) {
+            std::cout << "col2im:" << index << "/" << size << " [" << (double)(100*index/size) << "%]" << std::endl;
               if (is_a_ge_zero_and_a_lt_b(input_col, width)) {
                 data_im[input_row * width + input_col] += *data_col;
               }
               data_col++;
+                index++;
               input_col += stride_w;
             }
           }
@@ -100,27 +97,48 @@ void col2im_cpu(const T* data_col, const int channels,
       }
     }
   }
-}
-/*
-// Explicit instantiation to avoid linker errors for undefined references
-template void im2col_cpu<float>(const float* data_im, const int channels,
-                                const int height, const int width, const int kernel_h, const int kernel_w,
-                                const int pad_h, const int pad_w, const int stride_h, const int stride_w,
-                                float* data_col);
-template void im2col_cpu<double>(const double* data_im, const int channels,
-                                 const int height, const int width, const int kernel_h, const int kernel_w,
-                                 const int pad_h, const int pad_w, const int stride_h, const int stride_w,
-                                 double* data_col);
+}*/
 
-template void col2im_cpu<float>(const float* data_col, const int channels,
-                                const int height, const int width, const int kernel_h, const int kernel_w,
-                                const int pad_h, const int pad_w, const int stride_h, const int stride_w,
-                                float* data_im);
-template void col2im_cpu<double>(const double* data_col, const int channels,
-                                 const int height, const int width, const int kernel_h, const int kernel_w,
-                                 const int pad_h, const int pad_w, const int stride_h, const int stride_w,
-                                 double* data_im);
-*/
+void col2im_add_pixel(float *im, int height, int width, int channels,
+                        int row, int col, int channel, int pad, float val)
+{
+    row -= pad;
+    col -= pad;
+
+    if (row < 0 || col < 0 ||
+        row >= height || col >= width) return;
+    im[col + width*(row + height*channel)] += val;
+}
+
+template <typename T>
+void col2im_cpu(T* data_col,
+         int channels,  int height,  int width,
+         int ksize,  int stride, int pad, T* data_im) 
+{
+    int c,h,w;
+    const int size = ksize * ksize * channels * height * width;
+    int height_col = (height + 2*pad - ksize) / stride + 1;
+    int width_col = (width + 2*pad - ksize) / stride + 1;
+    int index = 0;
+    int channels_col = channels * ksize * ksize;
+    for (c = 0; c < channels_col; ++c) {
+        int w_offset = c % ksize;
+        int h_offset = (c / ksize) % ksize;
+        int c_im = c / ksize / ksize;
+        for (h = 0; h < height_col; ++h) {
+            for (w = 0; w < width_col; ++w) {
+                int im_row = h_offset + h * stride;
+                int im_col = w_offset + w * stride;
+                int col_index = (c * height_col + h) * width_col + w;
+                double val = data_col[col_index];
+                std::cout << "col2im:" << index << "/" << size << " [" << (double)(100*index/size) << "%]" << std::endl;
+                col2im_add_pixel(data_im, height, width, channels,
+                        im_row, im_col, c_im, pad, val);
+            }
+        }
+    }
+}
+
 // GEMM: A * B = C
 // https://github.com/soniab/darknetRISCVV/
 
@@ -133,7 +151,7 @@ void gemm_nn(int M, int N, int K, float ALPHA,
     #pragma omp parallel for
     for(i = 0; i < M; ++i){
         for(k = 0; k < K; ++k){
-            register float A_PART = ALPHA*A[i*lda+k];
+            float A_PART = ALPHA*A[i*lda+k];
             for(j = 0; j < N; ++j){
                 C[i*ldc+j] += A_PART*B[k*ldb+j];
             }
@@ -150,7 +168,7 @@ void gemm_nt(int M, int N, int K, float ALPHA,
     #pragma omp parallel for
     for(i = 0; i < M; ++i){
         for(j = 0; j < N; ++j){
-            register float sum = 0;
+            float sum = 0;
             for(k = 0; k < K; ++k){
                 sum += ALPHA*A[i*lda+k]*B[j*ldb + k];
             }
@@ -168,7 +186,7 @@ void gemm_tn(int M, int N, int K, float ALPHA,
     #pragma omp parallel for
     for(i = 0; i < M; ++i){
         for(k = 0; k < K; ++k){
-            register float A_PART = ALPHA*A[k*lda+i];
+            float A_PART = ALPHA*A[k*lda+i];
             for(j = 0; j < N; ++j){
                 C[i*ldc+j] += A_PART*B[k*ldb+j];
             }
@@ -185,7 +203,7 @@ void gemm_tt(int M, int N, int K, float ALPHA,
     #pragma omp parallel for
     for(i = 0; i < M; ++i){
         for(j = 0; j < N; ++j){
-            register float sum = 0;
+            float sum = 0;
             for(k = 0; k < K; ++k){
                 sum += ALPHA*A[i+k*lda]*B[k+j*ldb];
             }
@@ -237,16 +255,21 @@ rv64_gemm_convolution_fwd_t<T>::do_execute(const exec_ctx_t &ctx) const {
     auto const src_mb_size = pd()->IC() * pd()->IH() * pd()->IW();
     auto const dst_mb_size = pd()->OC() * pd()->OH() * pd()->OW();
     std::cout << "rv64_gemm_convolution_fwd_t<T>::do_execute" << std::endl;
+
+    int size = pd()->KH() * pd()->KW() * pd()->IC() * pd()->OH() * pd()->OW();
+    std::cout << "size: " << size << std::endl;
+
+    // Allocate memory for the intermediate data
+    // Using float col[size]; does not work due to stack size limitations
+    // Using float* col = new float[size]; does work since it uses the heap  
     
-    // Use a scratchpad to hold the intermediate data
-    auto scratchpad = ctx.get_scratchpad_grantor();
-    float col[100];//scratchpad.get<float>(key_conv_gemm_col);
-    std::cout << "Before im2col" << std::endl;
+    float* col = new float[size]; 
+    float* _dst = new float[dst_mb_size]; // Temporary memory for the output tensor
+    float* _gemm = new float[size];
     // im2col
+    std::cout << "Running im2col" << std::endl;
     im2col_cpu(src, pd()->IC(), pd()->IH(), pd()->IW(), 
-        pd()->KH(), pd()->KW(), 1, 1, 
-        1 , 1, col);
-    std::cout << "After im2col" << std::endl;
+        pd()->KH(), 1, 1, col);
     // GEMM: A * B = C
     // A is the input tensor, B is the weight tensor, and C is the output tensor
 
@@ -255,17 +278,27 @@ rv64_gemm_convolution_fwd_t<T>::do_execute(const exec_ctx_t &ctx) const {
     int N = pd()->OH() * pd()->OW(); // Output spatial dimensions (flattened)
     int K = pd()->IC() * pd()->KH() * pd()->KW(); // Dimension shared by A and B
 
-    std::cout << "GEMM" << std::endl;
-    gemm(0, 0, M, N, K, 1.0, col, K, wei, K, 1.0, col, pd()->OW());
-    std::cout << "After GEMM" << std::endl;
+    std::cout << "Running GEMM" << std::endl;
+    gemm(0, 0, M, N, K, 1.0, col, K, wei, K, 1.0, _gemm, pd()->OW());
 
-    std::cout << "Before col2im" << std::endl;
     // col2im
-    col2im_cpu(col, pd()->OC(), pd()->OH(), pd()->OW(), 
-        pd()->KH(), pd()->KW(), 1 , 1, 
-        1, 1, col);
-    std::cout << "After col2im" << std::endl;
-    dst = col;
+    std::cout << "Running col2im" << std::endl;
+    col2im_cpu(_gemm, pd()->OC(), pd()->OH(), pd()->OW(), 
+        pd()->KH(), 1, 1, dst);
+
+    //std::cout << "Copying col to dst" << std::endl;
+    // Check size of dst and _dst
+    //size_t dst_size = sizeof(data_t) * dst_mb_size;
+    //size_t _dst_size = sizeof(float) * dst_mb_size;
+
+    //std::cout << "Size of dst: " << dst_size << std::endl;
+    //std::cout << "Size of _dst: " << _dst_size << std::endl;
+    //std::memcpy(dst, _dst, sizeof(data_t) * dst_mb_size); // Ensure correct size
+
+    delete[] col;
+    delete[] _dst;
+    delete[] _gemm;
+
     return status::success;
 }
 
