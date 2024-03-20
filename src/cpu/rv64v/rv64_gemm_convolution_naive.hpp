@@ -20,11 +20,11 @@ namespace cpu {
 namespace rv64 {
 
 template <data_type_t T>
-struct rv64_gemm_convolution_fwd_t : public primitive_t {
+struct rv64_gemm_convolution_naive_fwd_t : public primitive_t {
     struct pd_t : public cpu_convolution_fwd_pd_t {
         using cpu_convolution_fwd_pd_t::cpu_convolution_fwd_pd_t;
 
-        DECLARE_COMMON_PD_T("rv64:gemm", rv64_gemm_convolution_fwd_t);
+        DECLARE_COMMON_PD_T("rv64:gemm", rv64_gemm_convolution_naive_fwd_t);
 
         status_t init(engine_t *engine) {
             using smask_t = primitive_attr_t::skip_mask_t;
@@ -49,7 +49,7 @@ struct rv64_gemm_convolution_fwd_t : public primitive_t {
         jit_convolution_configuration_t conf_;
     };
 
-    rv64_gemm_convolution_fwd_t(const pd_t *apd) : primitive_t(apd) {}
+    rv64_gemm_convolution_naive_fwd_t(const pd_t *apd) : primitive_t(apd) {}
 
     typedef typename prec_traits<T>::type data_t;
 
