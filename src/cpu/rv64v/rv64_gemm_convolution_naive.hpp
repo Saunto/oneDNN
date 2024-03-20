@@ -1,5 +1,5 @@
-#ifndef CPU_RV64V_RV64_GEMM_CONVOLUTION_HPP
-#define CPU_RV64V_RV64_GEMM_CONVOLUTION_HPP
+#ifndef CPU_RV64V_RV64_GEMM_CONVOLUTION_NAIVE_HPP
+#define CPU_RV64V_RV64_GEMM_CONVOLUTION_NAIVE_HPP
 
 #include <assert.h>
 
@@ -54,7 +54,7 @@ struct rv64_gemm_convolution_naive_fwd_t : public primitive_t {
     typedef typename prec_traits<T>::type data_t;
 
     status_t init(engine_t *engine) override {
-        init_schedule(schedule, pd()->conf_);
+        //init_schedule(schedule, pd()->conf_);
         return status::success;
     }
 
