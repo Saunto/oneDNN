@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <iostream>
 
+#include "common/dnnl_thread.hpp"
 #include "common/utils.hpp"
 #include "common/type_helpers.hpp"
 #include "cpu/rv64v/jit/convolution/gemm_kernel.hpp"
@@ -14,6 +15,148 @@ namespace gemm{
 
 using namespace rvjit;
 using jit_conv_kernel_args_t = convolution_schedule_t::jit_conv_kernel_args_t;
+
+namespace {
+// The following code is based on oneDNN/src/cpu/gemm/f32/gemm_utils_f32.cpp
+using namespace dnnl::impl::utils;
+
+// Uses m as a unroll factor.
+template <typename data_t>
+void copy_A(bool isTransA, dim_t K, const data_t *A, const dim_t lda, data_t *ws, const int m) {
+    for (dim_t k = 0; k < K; k++) {
+        PRAGMA_OMP_SIMD()
+        for (dim_t i = 0; i < m; i++) {
+            ws[i] = isTransA ? A[i * lda + k] : A[i + k * lda];
+        }
+        ws += m;
+    }
+}
+
+// Uses m and n as unroll factors.
+template <typename data_t, bool isTransA, bool isTransB>
+void kernel_mxn(dim_t K, const data_t *A, const dim_t lda, const data_t *B,
+        const dim_t ldb, data_t *C, const dim_t ldc, const data_t alpha,
+        const data_t beta, const dim_t m, const dim_t n) {
+    data_t c[m*n] = {static_cast<data_t>(0.)};
+    for (dim_t k = 0; k < K; k++) {
+        for (dim_t j = 0; j < n; j++) {
+            data_t b = isTransB ? B[j + k * ldb] : B[k + j * ldb];
+            PRAGMA_OMP_SIMD()
+            for (dim_t i = 0; i < m; i++) {
+                data_t a = isTransA ? A[i * lda + k] : A[i + lda * k];
+                c[i + m * j] += a * b;
+            }
+        }
+    }
+    for (dim_t j = 0; j < n; j++) {
+        PRAGMA_OMP_SIMD()
+        for (dim_t i = 0; i < m; i++) {
+            C[i + j * ldc] = (beta == static_cast<data_t>(0.))
+                    ? alpha * c[i + m * j]
+                    : alpha * c[i + m * j]
+                            + beta * C[i + j * ldc];
+        }
+    }
+}
+
+// Uses m and n as unroll factors.
+template <typename data_t, bool isTransA, bool isTransB>
+void block_ker(const dim_t M, const dim_t N, const dim_t K, const data_t *A,
+        const dim_t lda, const data_t *B, const dim_t ldb, data_t *C,
+        const dim_t ldc, const data_t alpha, const data_t beta, data_t *ws,
+        bool do_copy, const dim_t m, const dim_t n) {
+    dim_t Nu = rnd_dn(N, n);
+    dim_t Mu = rnd_dn(M, m);
+    for (dim_t i = 0; i < Mu; i += m) {
+        for (dim_t j = 0; j < Nu; j += n) {
+            const data_t *b = isTransB ? &B[j] : &B[j * ldb];
+            const data_t *a = isTransA ? &A[i * lda] : &A[i];
+            if (do_copy) {
+                if (j == 0) { copy_A<data_t>(isTransA, K, a, lda, ws); }
+                kernel_mxn<data_t, false, isTransB>(K, ws,
+                        m, b, ldb, &C[i + j * ldc], ldc,
+                        alpha, beta);
+            } else {
+                kernel_mxn<data_t, isTransA, isTransB>(
+                        K, a, lda, b, ldb, &C[i + j * ldc], ldc, alpha, beta);
+            }
+        }
+    }
+    // tail processing
+    for (dim_t i = 0; i < M; i++) {
+        for (dim_t j = Nu; j < N; j++) {
+            data_t c = beta == static_cast<data_t>(0.) ? static_cast<data_t>(0.)
+                                                       : beta * C[i + j * ldc];
+            for (dim_t p = 0; p < K; p++) {
+                data_t b = isTransB ? B[j + p * ldb] : B[p + j * ldb];
+                data_t a = isTransA ? A[p + i * lda] : A[i + p * lda];
+                c += alpha * a * b;
+            }
+            C[i + j * ldc] = c;
+        }
+    }
+    for (dim_t i = Mu; i < M; i++) {
+        for (dim_t j = 0; j < Nu; j++) {
+            data_t c = beta == static_cast<data_t>(0.) ? static_cast<data_t>(0.)
+                                                       : beta * C[i + j * ldc];
+            for (dim_t p = 0; p < K; p++) {
+                data_t b = isTransB ? B[j + p * ldb] : B[p + j * ldb];
+                data_t a = isTransA ? A[p + i * lda] : A[i + p * lda];
+                c += alpha * a * b;
+            }
+            C[i + j * ldc] = c;
+        }
+    }
+}
+
+template <typename data_t, bool isTransA, bool isTransB>
+void gemm_ithr(const dim_t M, const dim_t N, const dim_t K, const data_t alpha,
+        const data_t *A, const dim_t lda, const data_t *B, const dim_t ldb,
+        const data_t beta, data_t *C, const dim_t ldc, bool do_copy,
+        data_t *ws, const dim_t BM, const dim_t BN, const dim_t BK) {
+
+    const data_t *curA;
+    const data_t *curB;
+    data_t *curC;
+
+    if ((M <= 0) || (N <= 0)) return;
+
+    if ((K <= 0) || (alpha == static_cast<data_t>(0))) {
+        dim_t MN = N * M;
+        if (beta == static_cast<data_t>(0.)) {
+            for (dim_t j = 0; j < MN; j++)
+                C[j] = static_cast<data_t>(0.);
+        } else if (beta != static_cast<data_t>(1.)) {
+            for (dim_t j = 0; j < MN; j++)
+                C[j] *= beta;
+        }
+        return;
+    }
+
+    for (dim_t Bk = 0; Bk < K; Bk += BK) {
+        dim_t kb = nstl::min(K - Bk, BK);
+        for (dim_t Bm = 0; Bm < M; Bm += BM) {
+            dim_t mb = nstl::min(M - Bm, BM);
+            for (dim_t Bn = 0; Bn < N; Bn += BN) {
+                dim_t nb = nstl::min(N - Bn, BN);
+                curA = isTransA ? A + Bk + Bm * lda : A + Bm + Bk * lda;
+                curB = isTransB ? B + Bn + Bk * ldb : B + Bk + Bn * ldb;
+                curC = C + Bm + Bn * ldc;
+                if (Bk == 0) {
+                    block_ker<data_t, isTransA, isTransB>(mb, nb, kb, curA, lda,
+                            curB, ldb, curC, ldc, alpha, beta, ws, do_copy);
+                } else {
+                    block_ker<data_t, isTransA, isTransB>(mb, nb, kb, curA, lda,
+                            curB, ldb, curC, ldc, alpha,
+                            static_cast<data_t>(1.0), ws, do_copy);
+                }
+            }
+        }
+    }
+}
+} // namespace
+
+
 
 void jit_convolution_kernel_t::code() {
     const int nvregs = traits.erbw * traits.erbc;

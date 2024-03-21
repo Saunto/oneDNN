@@ -12,12 +12,14 @@
 #include "cpu/primitive_attr_postops.hpp"
 #include "cpu/cpu_convolution_pd.hpp"
 
-#include "cpu/rv64v/jit/convolution/driver.hpp"
+#include "cpu/rv64v/jit/convolution/gemm_driver.hpp"
 
 namespace dnnl {
 namespace impl {
 namespace cpu {
 namespace rv64 {
+
+using namespace gemm;
 
 template <data_type_t T>
 struct rv64_gemm_convolution_jit_fwd_t : public primitive_t {
@@ -46,7 +48,7 @@ struct rv64_gemm_convolution_jit_fwd_t : public primitive_t {
         }
 
         /// The convolution kernel arguments and optimizations structure
-        jit_convolution_configuration_t conf_;
+        gemm::jit_convolution_configuration_t conf_;
     };
 
     rv64_gemm_convolution_jit_fwd_t(const pd_t *apd) : primitive_t(apd) {}
@@ -63,7 +65,7 @@ struct rv64_gemm_convolution_jit_fwd_t : public primitive_t {
     }
 
 private:
-    convolution_schedule_t schedule;
+    gemm::convolution_schedule_t schedule;
     status_t do_execute(const exec_ctx_t &ctx) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 };
