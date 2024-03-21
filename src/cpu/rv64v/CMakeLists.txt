@@ -10,6 +10,12 @@ add_library(${RV64VJIT_LIB} OBJECT ${RV64VJIT_LIB_SOURCES})
 
 set(RV64V_LIB ${DNNL_LIBRARY_NAME}_cpu_rv64v)
 set(RV64V_LIB_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/rv64_gemm_convolution.cpp"    
+    "${CMAKE_CURRENT_SOURCE_DIR}/rv64_gemm_convolution.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/rv64_gemm_convolution_naive.cpp"    
+    "${CMAKE_CURRENT_SOURCE_DIR}/rv64_gemm_convolution_naive.hpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/rv64_gemm_convolution_jit.cpp"    
+    "${CMAKE_CURRENT_SOURCE_DIR}/rv64_gemm_convolution_jit.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/jit_rv64v_convolution.hpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/jit_rv64v_convolution.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/jit/platform_traits.hpp"
