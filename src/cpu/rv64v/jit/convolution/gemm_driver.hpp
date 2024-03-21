@@ -8,6 +8,7 @@ namespace dnnl {
 namespace impl {
 namespace cpu {
 namespace rv64 {
+namespace gemm {
 
 struct jit_convolution_configuration_t {
     // Convolutional arguments
@@ -109,6 +110,7 @@ void free_schedule(convolution_schedule_t &s);
 void call_schedule(const convolution_schedule_t &s, int i, int mb,
                     const float *dst, const float *src, const float *wei, const float *bias);
 
+} // namespace gemm
 } // namespace rv64
 } // namespace cpu
 } // namespace impl

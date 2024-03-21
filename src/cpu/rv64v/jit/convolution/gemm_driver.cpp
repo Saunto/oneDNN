@@ -14,7 +14,7 @@ namespace dnnl {
 namespace impl {
 namespace cpu {
 namespace rv64 {
-
+namespace gemm {
 struct schedule_factory_t {
     convolution_schedule_t &sched;
     kernel_traits_t *traits;
@@ -808,6 +808,7 @@ const float *dst, const float *src, const float *wei, const float *bias) {
     s.calls[i](kargs);
 }
 
+} // namespace gemm
 } // namespace dnnl
 } // namespace impl
 } // namespace cpu

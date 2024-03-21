@@ -8,6 +8,7 @@ namespace dnnl {
 namespace impl {
 namespace cpu {
 namespace rv64 {
+namespace gemm {
 
 /// A structure to identify a micro-kernel solving a sub-convolution
 /// Rationale: The convolution micro-kernel computes a convolution over a
@@ -58,6 +59,7 @@ private:
     void bwdw_inner_loops(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp);
 };
 
+} // namespace gemm
 } // namespace rv64
 } // namespace cpu
 } // namespace impl

@@ -10,6 +10,7 @@ namespace dnnl {
 namespace impl {
 namespace cpu {
 namespace rv64 {
+namespace gemm{
 
 using namespace rvjit;
 using jit_conv_kernel_args_t = convolution_schedule_t::jit_conv_kernel_args_t;
@@ -678,6 +679,7 @@ void jit_convolution_kernel_t::bwdw_inner_loops(rvjit::vr_t *vout,
     bnez(h_iter, "h_loop");
 }
 
+} // namespace gemm
 } // namespace dnnl
 } // namespace impl
 } // namespace cpu
