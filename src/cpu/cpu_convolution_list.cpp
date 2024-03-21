@@ -67,8 +67,10 @@ using namespace dnnl::impl::cpu::x64;
 #endif
 using namespace dnnl::impl::cpu::aarch64;
 #elif DNNL_RV64
-#include "cpu/rv64v/jit_rv64v_convolution.hpp"
 #include "cpu/rv64v/rv64_gemm_convolution.hpp"
+#include "cpu/rv64v/jit_rv64v_convolution.hpp"
+#include "cpu/rv64v/rv64_gemm_convolution_naive.hpp"
+#include "cpu/rv64v/rv64_gemm_convolution_jit.hpp"
 using namespace dnnl::impl::cpu::rv64;
 #endif
 
@@ -106,8 +108,10 @@ const std::map<pk_dt_impl_key_t, std::vector<impl_list_item_t>> &impl_list_map()
             CPU_INSTANCE_AARCH64(jit_sve_512_convolution_fwd_t<f32>)
             CPU_INSTANCE_AARCH64_ACL(acl_indirect_gemm_convolution_fwd_t)
             CPU_INSTANCE_AARCH64_ACL(acl_gemm_convolution_fwd_t<f32>)
-            CPU_INSTANCE_RV64(rv64_gemm_convolution_fwd_t<f32>)
-            CPU_INSTANCE_RV64(jit_rv64v_convolution_fwd_t<f32>)
+            //CPU_INSTANCE_RV64(rv64_gemm_convolution_fwd_t<f32>)
+            //CPU_INSTANCE_RV64(rv64_gemm_convolution_naive_fwd_t<f32>)
+            CPU_INSTANCE_RV64(rv64_gemm_convolution_jit_fwd_t<f32>)
+            //CPU_INSTANCE_RV64(jit_rv64v_convolution_fwd_t<f32>)
             CPU_INSTANCE(gemm_convolution_fwd_t)
             CPU_INSTANCE(ref_convolution_fwd_t)
             CPU_INSTANCE(ref_fused_convolution_fwd_t)
