@@ -55,8 +55,6 @@ private:
     const int imm_range = imm12_max() - imm_min();
 
     void fwdd_inner_loops(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp);
-    void bwdd_inner_loops(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp);
-    void bwdw_inner_loops(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp);
 };
 
 } // namespace gemm
