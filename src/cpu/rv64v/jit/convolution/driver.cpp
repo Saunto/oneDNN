@@ -765,6 +765,10 @@ void init_schedule(convolution_schedule_t &s,
             schedule_fwdd(s);
             break;
         }
+        case prop_kind::forward_inference: {
+            schedule_fwdd(s);
+            break;
+        }
         case prop_kind::backward_data: {
             schedule_bwdd(s);
             break;
