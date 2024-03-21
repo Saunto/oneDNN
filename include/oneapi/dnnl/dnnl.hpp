@@ -533,6 +533,8 @@ enum class algorithm {
     convolution_direct = dnnl_convolution_direct,
     /// Winograd convolution
     convolution_winograd = dnnl_convolution_winograd,
+    // Gemm convolution
+    convolution_gemm = dnnl_convolution_gemm,
     /// Direct deconvolution
     deconvolution_direct = dnnl_deconvolution_direct,
     /// Winograd deconvolution
