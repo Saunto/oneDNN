@@ -21,6 +21,8 @@ namespace {
 using namespace dnnl::impl::utils;
 
 // Uses m as a unroll factor.
+// Purpose: Copies the rows or columns (depending on isTransA) of matrix A
+// into the workspace ws, to make the data access pattern more cache friendly.
 template <typename data_t>
 void copy_A(bool isTransA, dim_t K, const data_t *A, const dim_t lda, data_t *ws, const int m) {
     for (dim_t k = 0; k < K; k++) {
@@ -33,6 +35,9 @@ void copy_A(bool isTransA, dim_t K, const data_t *A, const dim_t lda, data_t *ws
 }
 
 // Uses m and n as unroll factors.
+// Purpose: Performs the core computation of the matrix multiplication.
+// The function computes the matrix product of A and B and accumulates the
+// result into matrix C. 
 template <typename data_t, bool isTransA, bool isTransB>
 void kernel_mxn(dim_t K, const data_t *A, const dim_t lda, const data_t *B,
         const dim_t ldb, data_t *C, const dim_t ldc, const data_t alpha,
@@ -60,6 +65,8 @@ void kernel_mxn(dim_t K, const data_t *A, const dim_t lda, const data_t *B,
 }
 
 // Uses m and n as unroll factors.
+// Purpose: Computes the block matrix multiplication of A and B and accumulates
+// the result into matrix using kernel_mxn function. 
 template <typename data_t, bool isTransA, bool isTransB>
 void block_ker(const dim_t M, const dim_t N, const dim_t K, const data_t *A,
         const dim_t lda, const data_t *B, const dim_t ldb, data_t *C,
@@ -109,6 +116,8 @@ void block_ker(const dim_t M, const dim_t N, const dim_t K, const data_t *A,
     }
 }
 
+// Purpose: The top-level function for the GEMM computation. The function
+// It partitions the input matrices into blocks and calls the block_ker function
 template <typename data_t, bool isTransA, bool isTransB>
 void gemm_ithr(const dim_t M, const dim_t N, const dim_t K, const data_t alpha,
         const data_t *A, const dim_t lda, const data_t *B, const dim_t ldb,
@@ -164,10 +173,6 @@ void jit_convolution_kernel_t::code() {
     const size_t bia_sew = cfg.with_bias ? types::data_type_size(cfg.bias_dt) : 0;
     const size_t src_sew = types::data_type_size(cfg.src_dt);
     const size_t dst_sew = types::data_type_size(cfg.dst_dt);
-    const bool is_bwdw = cfg.prop_kind == prop_kind::backward_weights;
-    const bool is_bwdd = cfg.prop_kind == prop_kind::backward_data;
-    const bool is_fwdd = utils::one_of(cfg.prop_kind,
-        prop_kind::forward_inference, prop_kind::forward_training);
 
     const size_t out_sew =
         utils::pick_by_prop_kind(cfg.prop_kind, dst_sew, src_sew, wei_sew);
@@ -200,15 +205,10 @@ void jit_convolution_kernel_t::code() {
         assembly_constant_t asm_c_off;
         assembly_constant_t asm_w_off;
 
-        if (!is_bwdw) {
-            asm_w_off = asm_const(pool, w_off);
-            // Subtract the accumulated W offset
-            asm_c_off = asm_const(pool, c_off - (cfg.rbw-1) * w_off);
-        } else {
-            asm_c_off = asm_const(pool, c_off);
-            // Subtract the accumulated C offset
-            asm_w_off = asm_const(pool, w_off - (cfg.rbc-1) * c_off);
-        }   
+
+        asm_w_off = asm_const(pool, w_off);
+        // Subtract the accumulated W offset
+        asm_c_off = asm_const(pool, c_off - (cfg.rbw-1) * w_off);
 
         ld(out, a0, args_out_ptr);
         if (cfg.rbc > 1)
@@ -225,135 +225,15 @@ void jit_convolution_kernel_t::code() {
                 vl(vout[id], out, out_sew);
             else
                 vs(vout[id], out, out_sew);
-            if (!is_bwdw) {
-                is_done = utils::nd_iterator_step(c, cfg.rbc, w, cfg.rbw);
-                if (!is_done) {
-                    if (w)
-                        add_constant(out, out, asm_w_off);
-                    else
-                        add_constant(out, out, asm_c_off);
-                }
-            } else {
-                is_done = utils::nd_iterator_step(w, cfg.rbw, c, cfg.rbc);
-                if (!is_done) {
-                    if (c)
-                        add_constant(out, out, asm_c_off);
-                    else
-                        add_constant(out, out, asm_w_off);
-                }
+            //if (!is_bwdw) {
+            is_done = utils::nd_iterator_step(c, cfg.rbc, w, cfg.rbw);
+            if (!is_done) {
+                if (w)
+                    add_constant(out, out, asm_w_off);
+                else
+                    add_constant(out, out, asm_c_off);
             }
         } while(!is_done);
-    };
-
-    const auto bwdd_strided_zero_elems = [&](register_pool_t &pool) {
-        /// Offset of the bwdw_zero flag in the ukernel input structure
-        const size_t args_out_bwdd_zero =
-            offsetof(jit_conv_kernel_args_t, bwdd_zrow);
-        /// A vector register initialized with zeroes
-        const vr_t vz = vout[0];
-        /// Number of elements to zero in the first row per register
-        const int zew = (cfg.stride_w - 1) * cfg.icb;
-        /// Number of elements to zero in each of the subsequent rows
-        const int zeh = cfg.stride_w * traits.erbw * cfg.icb;
-
-        // Check if there are any elements to set to zero
-        if (cfg.stride_h * cfg.stride_w == 1)
-            return;
-
-        /// Pointer to the base of the output tensor
-        const gpr_t out = pool.pick();
-
-        // Zero elements in the first row skipped due to horizontal stride
-        if (zew) {
-            auto blk_size        = asm_const(pool, 1 * cfg.icb * src_sew);
-            auto skip_blk_stride = asm_const(pool, 2 * cfg.icb * src_sew);
-
-            // Move to the first block with elements to set to zero
-            prepare_constant(blk_size);
-            prepare_constant(skip_blk_stride);
-            ld(out, a0, args_out_ptr);
-            add_constant(out, out, blk_size);
-            // Set each activation block to zero
-            for (int p = 0; p < traits.erbw; ++p) {
-                vs(vz, out, out_sew);
-                for (int i = 2; i < cfg.stride_w; ++i) {
-                    add_constant(out, out, blk_size);
-                    vs(vz, out, out_sew);
-                }
-                if (p+1 < traits.erbw)
-                    add_constant(out, out, skip_blk_stride);
-            }
-        }
-        // Zero elements in subsequent rows skipped due to vertical stride
-        if (zeh) {
-            /// Loop to zero elements in the same row
-            const bool needs_col_loop = zeh > cfg.maxvl;
-            /// Loop to cover all rows skipped due to vertical stride
-            const bool needs_row_loop = cfg.stride_h > 2;
-            /// Stride to advance to the next row (walk the IH dimension)
-            auto h_stride = asm_const(pool, cfg.iw * cfg.icb * src_sew);
-            /// The loop iterator over the rows (used when needs_row_loop)
-            gpr_t row_loop_it = x0;
-            /// The loop iterator over the row columns
-            gpr_t col_loop_it = pool.pick();
-
-            // Check the function arguments to see if this must be performed
-            lw(pool.head(), a0, args_out_bwdd_zero);
-            beqz(pool.head(), "compute");
-
-            // Prepare the output pointer and the stride register
-            ld(out, a0, args_out_ptr);
-            prepare_constant(h_stride);
-
-            // Set up loop iterator for rows when stride skips 2 or more rows
-            if (needs_row_loop) {
-                row_loop_it = pool.pick();
-                load_constant(row_loop_it, cfg.stride_h-1);
-            }
-
-            // Case 1: one vector store sets all elements in a row to zero
-            if (!needs_col_loop) {
-                if (zeh != cfg.vlen) {
-                    load_constant(col_loop_it, zeh);
-                    vsetvli(x0, col_loop_it, vsew(src_sew) | vlmul(1));
-                    // If stores use a greater vlen w.r.t the compute segment,
-                    // the output register tail must be zero-initialized
-                    if (zeh > cfg.vlen)
-                        vxor_vv(vz, vz, vz);
-                }
-
-                L("loop_rows");
-                add_constant(out, out, h_stride);
-                vs(vz, out, src_sew);
-            // Case 2: more than one vector store is required to zero elements
-            } else {
-                const gpr_t out_ptr = pool.pick(); // Row offset pointer
-                const gpr_t vlen = pool.pick();    // This iteration vlen
-
-                L("loop_rows");
-                load_constant(col_loop_it, zeh);
-                add_constant(out, out, h_stride);
-                mv(out_ptr, out);
-
-                L("loop_cols");
-                vsetvli(vlen, col_loop_it, vsew(src_sew) | vlmul(1));
-                vs(vz, out_ptr, src_sew);
-                sub(col_loop_it, col_loop_it, vlen);
-                slli(vlen, vlen, log2(src_sew));
-                add(out_ptr, out_ptr, vlen);
-                bnez(col_loop_it, "loop_cols");
-            }
-            // Update the row loop iterator and evaluate the branch
-            if (needs_row_loop) {
-                addi(row_loop_it, row_loop_it, -1);
-                bnez(row_loop_it, "loop_rows");
-            }
-        }
-        // If the vector length changed during this step, revert it back
-        if (zeh != cfg.vlen) {
-            ld(pool.head(), a0, offsetof(jit_conv_kernel_args_t, vlen));
-            vsetvli(x0, pool.head(), vsew(src_sew) | vlmul(1));
-        }
     };
 
     // Initialization Segment
@@ -368,8 +248,6 @@ void jit_convolution_kernel_t::code() {
         bnez(load_partials, "load_psum");
         for (int i = 0; i < nvregs; ++i)
             vxor_vv(vout[i], vout[i], vout[i]);
-        if (is_bwdd)
-            bwdd_strided_zero_elems(tmp_pool);
         j("compute");
         L("load_psum");
         move_outputs(true, tmp_pool);
@@ -393,7 +271,7 @@ void jit_convolution_kernel_t::code() {
         
     // Store Partial Sums Segment
     // TODO: this is temporary BIAS support
-    if (cfg.with_bias && is_fwdd) {
+    if (cfg.with_bias) {//&& is_fwdd) {
         auto tmp   = tmp_pool.pick();
         auto bias_ptr  = tmp_pool.head();
         auto vbias = static_cast<vr_t>(nvregs);
@@ -436,7 +314,6 @@ void jit_convolution_kernel_t::fwdd_inner_loops(rvjit::vr_t *vout, int rb_sz, re
     //   for (kh = padTop; kh < k_h - padBot; ++kh)
     //    for (kw = 0; kh < k_w; ++kw)
     //     for (ic = 0; ic < w_icb; ++ic)
-    std::cout << "jit_convolution_kernel_t::fwdd_inner_loops" << std::endl;
     auto const xcb = cfg.icb;
     auto const wxcb = cfg.w_icb;
     auto const kxcb_loop_sz = nstl::max(1, cfg.k_c/xcb);
