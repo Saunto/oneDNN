@@ -70,23 +70,17 @@ void kernel_mxn(dim_t K, const data_t *A, const dim_t lda, const data_t *B,
 template <typename data_t, bool isTransA, bool isTransB>
 void block_ker(const dim_t M, const dim_t N, const dim_t K, const data_t *A,
         const dim_t lda, const data_t *B, const dim_t ldb, data_t *C,
-        const dim_t ldc, const data_t alpha, const data_t beta, data_t *ws,
-        bool do_copy, const dim_t m, const dim_t n) {
+        const dim_t ldc, const data_t alpha, const data_t beta,
+        const dim_t m, const dim_t n) {
     dim_t Nu = rnd_dn(N, n);
     dim_t Mu = rnd_dn(M, m);
     for (dim_t i = 0; i < Mu; i += m) {
         for (dim_t j = 0; j < Nu; j += n) {
             const data_t *b = isTransB ? &B[j] : &B[j * ldb];
             const data_t *a = isTransA ? &A[i * lda] : &A[i];
-            if (do_copy) {
-                if (j == 0) { copy_A<data_t>(isTransA, K, a, lda, ws); }
-                kernel_mxn<data_t, false, isTransB>(K, ws,
-                        m, b, ldb, &C[i + j * ldc], ldc,
-                        alpha, beta);
-            } else {
-                kernel_mxn<data_t, isTransA, isTransB>(
-                        K, a, lda, b, ldb, &C[i + j * ldc], ldc, alpha, beta);
-            }
+            kernel_mxn<data_t, isTransA, isTransB>(
+                K, a, lda, b, ldb, &C[i + j * ldc], ldc, alpha, beta);
+            
         }
     }
     // tail processing
@@ -121,8 +115,8 @@ void block_ker(const dim_t M, const dim_t N, const dim_t K, const data_t *A,
 template <typename data_t, bool isTransA, bool isTransB>
 void gemm_ithr(const dim_t M, const dim_t N, const dim_t K, const data_t alpha,
         const data_t *A, const dim_t lda, const data_t *B, const dim_t ldb,
-        const data_t beta, data_t *C, const dim_t ldc, bool do_copy,
-        data_t *ws, const dim_t BM, const dim_t BN, const dim_t BK) {
+        const data_t beta, data_t *C, const dim_t ldc,
+        const dim_t BM, const dim_t BN, const dim_t BK) {
 
     const data_t *curA;
     const data_t *curB;
@@ -153,18 +147,65 @@ void gemm_ithr(const dim_t M, const dim_t N, const dim_t K, const data_t alpha,
                 curC = C + Bm + Bn * ldc;
                 if (Bk == 0) {
                     block_ker<data_t, isTransA, isTransB>(mb, nb, kb, curA, lda,
-                            curB, ldb, curC, ldc, alpha, beta, ws, do_copy);
+                            curB, ldb, curC, ldc, alpha, beta);
                 } else {
                     block_ker<data_t, isTransA, isTransB>(mb, nb, kb, curA, lda,
                             curB, ldb, curC, ldc, alpha,
-                            static_cast<data_t>(1.0), ws, do_copy);
+                            static_cast<data_t>(1.0));
                 }
             }
         }
     }
 }
+
 } // namespace
 
+// Reference GEMM is located in oneDNN/src/cpu/gemm/f32/ref_gemm_f32.cpp
+// This code is compiled with sequential execution in mind
+template <typename data_t>
+dnnl_status_t gemm(const char *transa_, const char *transb_,
+    const dim_t *M_, const dim_t *N_, const dim_t *K_, const data_t *alpha_,
+    const data_t *A, const dim_t *lda_, const data_t *B, const dim_t *ldb_,
+    const data_t *beta_, data_t *C, const dim_t *ldc_, const data_t *bias){
+
+    if (!(utils::one_of(*transa_, 'n', 'N', 't', 'T')
+                && utils::one_of(*transb_, 'n', 'N', 't', 'T')))
+        return dnnl_unimplemented;
+
+    bool isTransA = (*transa_ == 'T' || *transa_ == 't');
+    bool isTransB = (*transb_ == 'T' || *transb_ == 't');
+    const dim_t M = *M_, N = *N_, K = *K_;
+    const dim_t lda = *lda_, ldb = *ldb_, ldc = *ldc_;
+    const data_t alpha = *alpha_, beta = *beta_;
+
+    // early out and avoid division by zero
+    if (utils::one_of(0, M, N)) return dnnl_success;
+
+    if (!isTransA) {
+        if (!isTransB) {
+            gemm_ithr<data_t, false, false>(M, N, K, alpha, A,
+                    lda, B, ldb, beta, C, ldc);
+        } else {
+            gemm_ithr<data_t, false, true>(M, N, K, alpha, A,
+                    lda, B, ldb, beta, C, ldc);
+        }
+    } else {
+        if (!isTransB) {
+            gemm_ithr<data_t, true, false>(M, N, K, alpha, A,
+                    lda, B, ldb, beta, C, ldc);
+        } else {
+            gemm_ithr<data_t, true, true>(M, N, K, alpha, A,
+                    lda, B, ldb, beta, C, ldc);
+        }
+    }
+    if (bias) {
+        parallel_nd(N, M, [&](dim_t i, dim_t j) { C[i * ldc + j] += bias[j]; });
+    }
+
+    
+    return dnnl_success;
+    
+}
 
 
 void jit_convolution_kernel_t::code() {
@@ -288,6 +329,8 @@ void jit_convolution_kernel_t::code() {
     move_outputs(false, tmp_pool);
     ret();
 }
+
+
 
 int
 starting_point(jit_convolution_configuration_t cfg, int rbw, int kh, int kw) {
