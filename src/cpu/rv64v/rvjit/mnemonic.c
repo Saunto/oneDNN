@@ -1471,6 +1471,15 @@ def_IV_VXI(vor, 0x10)
 // Vector Bitwise XOR
 def_IV_VXI(vxor, 0x0B)
 
+// Vector Bitwise SLT
+def_IV_VXI(vslt, 0x1B)
+
+// Vector Bitwise SEQ
+def_IV_VXI(vseq, 0x18)
+
+// Vector Bitwise SGT
+def_IV_VXI(vsgt, 0x1f)
+
 // Vector Integer Divide
 def_IV_VX(vdiv, 0x21)
 
@@ -1536,7 +1545,21 @@ def_FV_VF(vfmacc, 0x2C)
 
 // Vector Reduction Operations (TODO)
 // Vector Mask Instructions (TODO)
+rvj_instr rvj_vmand_vv(REGV vd, REGV vs1, REGV vs2) {
+    return opIVV(vd, vs1, vs2, 0x09, rvj_unmasked);
+}
 
+rvj_instr rvj_vmslt_vx(REGV vd, REGV vs1, REGV vs2) {
+    return opIVV(vd, vs1, vs2, 0x1B, rvj_unmasked);
+}
+
+rvj_instr rvj_vmseq_vv(REGV vd, REGV vs1, REGV vs2) {
+    return opIVV(vd, vs1, vs2, 0x18, rvj_unmasked);
+}
+
+rvj_instr rvj_vmsgt_vx(REGV vd, REGV vs1, REGV vs2) {
+    return opIVV(vd, vs1, vs2, 0x1f, rvj_unmasked);
+}
 // Vector Permutation Instructions (TODO)
 
 // Vector Integer Scalar Move Instructions
