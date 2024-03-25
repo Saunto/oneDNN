@@ -685,7 +685,8 @@ rvj_instr rvj_vfmacc_vf(REGV vd, REGF rs1, REGV vs2, rvj_vmask vm);
 
 // Vector Reduction Operations (TODO)
 // Vector Mask Instructions (TODO)
-rvj_instr rvj_vmand_vv(rvj_vmask vd, REGV vs1, REGV vs2);
+rvj_instr rvj_vmand_mm(rvj_vmask vd, rvj_vmask vs1, rvj_vmask vs2);
+rvj_instr rvj_vmor_mm(rvj_vmask vd, rvj_vmask vs1, rvj_vmask vs2);
 rvj_instr rvj_vmslt_vx(rvj_vmask vd, REGV vs1, REGV vs2);
 rvj_instr rvj_vmseq_vv(rvj_vmask vd, REGV vs1, REGV vs2);
 rvj_instr rvj_vmsgt_vx(rvj_vmask vd, REGV vs1, REGV vs2);

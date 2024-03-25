@@ -1687,8 +1687,12 @@ protected:
 
     // Vector Reduction Operations (TODO)
     // Vector Mask Instructions (TODO)
-    void vmand_vv(rvj_vmask vd, vr_t vs1, vr_t vs2) {
-        push(rvj_vmand_vv(vd, vs1, vs2));
+    void vmand_mm(rvj_vmask vd, rvj_vmask vs1, rvj_vmask vs2) {
+        push(rvj_vmand_mm(vd, vs1, vs2));
+    }
+
+    void vmor_mm(rvj_vmask vd, rvj_vmask vs1, rvj_vmask vs2) {
+        push(rvj_vmor_mm(vd, vs1, vs2));
     }
 
     void vmslt_vx(rvj_vmask vd, vr_t vs1, vr_t vs2) {
@@ -1713,6 +1717,9 @@ protected:
         push(rvj_vmv_sx(vd, rs1));
     }
 
+    void vmv_vx(vr_t vd, gpr_t rs1) {
+        push(rvj_vmv_vx(vd, rs1));
+    }
     // Vector Floating-Point Scalar Move Instructions
     void vfmv_fs(fpr_t vd, vr_t vs2) {
         push(rvj_vfmv_fs(vd, vs2));

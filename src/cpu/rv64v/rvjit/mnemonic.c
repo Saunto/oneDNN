@@ -1480,6 +1480,12 @@ def_IV_VXI(vseq, 0x18)
 // Vector Bitwise SGT
 def_IV_VXI(vsgt, 0x1f)
 
+// Vector Mask AND
+def_IV_VXI(vmand, 0x19)
+
+// Vector Mask OR
+def_IV_VXI(vmor, 0x1a)
+
 // Vector Integer Divide
 def_IV_VX(vdiv, 0x21)
 
@@ -1545,8 +1551,12 @@ def_FV_VF(vfmacc, 0x2C)
 
 // Vector Reduction Operations (TODO)
 // Vector Mask Instructions (TODO)
-rvj_instr rvj_vmand_vv(rvj_vmask vd, REGV vs1, REGV vs2) {
-    return opIVV(vd, vs1, vs2, 0x09, rvj_unmasked);
+rvj_instr rvj_vmand_mm(rvj_vmask vd, rvj_vmask vs1, rvj_vmask vs2) {
+    return opIVV(vd, vs1, vs2, 0x19, rvj_unmasked);
+}
+
+rvj_instr rvj_vmor_mm(rvj_vmask vd, rvj_vmask vs1, rvj_vmask vs2) {
+    return opIVV(vd, vs1, vs2, 0x1A, rvj_unmasked);
 }
 
 rvj_instr rvj_vmslt_vx(rvj_vmask vd, REGV vs1, REGV vs2) {
