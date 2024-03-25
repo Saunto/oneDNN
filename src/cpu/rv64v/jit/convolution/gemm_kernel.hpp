@@ -26,7 +26,7 @@ namespace gemm {
 /// micro-kernel, and wheter or not this shape overlaps the tensor padding,
 /// as the latter condition might cause some computations to be skipped.
 struct kernel_traits_t {
-    int erbw; // Effective register block widht
+    int erbw; // Effective register block width
     int erbc; // Effective register block channel size
     int rbpadT; // H axis padding overlap to the top of the register block
     int rbpadB; // H axis padding overlap to the bot of the register block
@@ -54,7 +54,14 @@ public:
 private:
     const int imm_range = imm12_max() - imm_min();
 
+    template <typename T>
+    void im2col_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, const T* data_im,const T* data_col,int channels,  int height,  int width,int ksize,  int stride, int pad);
     void fwdd_inner_loops(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp);
+
+    template <typename data_t> dnnl_status_t gemm(const char *transa_, const char *transb_,
+    const dim_t *M_, const dim_t *N_, const dim_t *K_, const data_t *alpha_,
+    const data_t *A, const dim_t *lda_, const data_t *B, const dim_t *ldb_,
+    const data_t *beta_, data_t *C, const dim_t *ldc_, const data_t *bias);
 };
 
 } // namespace gemm
