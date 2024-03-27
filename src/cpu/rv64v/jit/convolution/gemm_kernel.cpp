@@ -21,14 +21,14 @@ using jit_conv_kernel_args_t = convolution_schedule_t::jit_conv_kernel_args_t;
 // Implementing DARKNET vectorized functions using JIT instructions
 using namespace dnnl::impl::utils;
 using namespace rvjit::vtype;
-
 template <typename T>
-void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, const T* data_im,const T* data_col,int channels,  int height,  int width,int ksize,  int stride, int pad)
+void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, 
+    const T data_im,const T data_col,int channels,  int height,  int width,int ksize,  int stride, int pad)
 {
     int c,h,w, index; 
     int height_col = (height + 2*pad - ksize) / stride + 1;
     int width_col = (width + 2*pad - ksize) / stride + 1;
-
+    std::cout << "JIT im2col" << std::endl;
     // register_pool_t tmp_pool({t0,t1,t2,t3,t4,t5,t6,a7,a6,a5,a4,a3,a2,a1});
         
     const gpr_t gvl = tmp.pick();
@@ -64,10 +64,12 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
     const vr_t dataim = vout[19];
     const vr_t datacol = vout[20];
  
-    load_constant(src, &data_im);
-    load_constant(col, &data_col);
+    load_constant(src, data_im);
+    load_constant(col, data_col);
+    load_constant(vlen, cfg.vlen);
     int channels_col = channels * ksize * ksize;
     for (c = 0; c < channels_col; ++c) {
+        std::cout << "c: " << c << "/" << channels_col << std::endl;
         int w_offset = c % ksize;
         load_constant(w_reg, w_offset);
         int h_offset = (c / ksize) % ksize;
@@ -85,7 +87,7 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
                 vtype_t sew = e32;
                 vtype_t lmul = m1;
                 unsigned long int max_elements = rvl / sew;
-                vsetvli(gvl, vlen, vsew(sew) | vlmul(1));
+                vsetvli(gvl, vlen, sew | vlmul(1));
 
                 //Index calculation
                 load_constant(tmp1, w);
@@ -166,222 +168,307 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
                 vlox(dataim, src, VAL, mask4);
                 //store with index
                 vsox(datacol, col, colindex, mask4);
-                w += gvl;
-
+                w += cfg.vlen;//gvl;
+                
                 }
 
         }
     }
 }
 
-namespace {
-// Uses m as a unroll factor.
-// Purpose: Copies the rows or columns (depending on isTransA) of matrix A
-// into the workspace ws, to make the data access pattern more cache friendly.
-template <typename data_t>
-void copy_A(bool isTransA, dim_t K, const data_t *A, const dim_t lda, data_t *ws, const int m) {
-    for (dim_t k = 0; k < K; k++) {
-        PRAGMA_OMP_SIMD()
-        for (dim_t i = 0; i < m; i++) {
-            ws[i] = isTransA ? A[i * lda + k] : A[i + k * lda];
-        }
-        ws += m;
-    }
-}
 
-// Uses m and n as unroll factors.
-// Purpose: Performs the core computation of the matrix multiplication.
-// The function computes the matrix product of A and B and accumulates the
-// result into matrix C. 
-template <typename data_t, bool isTransA, bool isTransB>
-void kernel_mxn(dim_t K, const data_t *A, const dim_t lda, const data_t *B,
-        const dim_t ldb, data_t *C, const dim_t ldc, const data_t alpha,
-        const data_t beta, const dim_t m, const dim_t n) {
-    data_t c[m*n] = {static_cast<data_t>(0.)};
-    for (dim_t k = 0; k < K; k++) {
-        for (dim_t j = 0; j < n; j++) {
-            data_t b = isTransB ? B[j + k * ldb] : B[k + j * ldb];
-            PRAGMA_OMP_SIMD()
-            for (dim_t i = 0; i < m; i++) {
-                data_t a = isTransA ? A[i * lda + k] : A[i + lda * k];
-                c[i + m * j] += a * b;
-            }
-        }
-    }
-    for (dim_t j = 0; j < n; j++) {
-        PRAGMA_OMP_SIMD()
-        for (dim_t i = 0; i < m; i++) {
-            C[i + j * ldc] = (beta == static_cast<data_t>(0.))
-                    ? alpha * c[i + m * j]
-                    : alpha * c[i + m * j]
-                            + beta * C[i + j * ldc];
-        }
-    }
-}
+/***********************3. loop interchange with manual vectorization with ALPHA!=1 double buffer ****************/
+/* Manual vectorization with loop interchange + loop unrolling with unroll degree 24*/
 
-// Uses m and n as unroll factors.
-// Purpose: Computes the block matrix multiplication of A and B and accumulates
-// the result into matrix using kernel_mxn function. 
-template <typename data_t, bool isTransA, bool isTransB>
-void block_ker(const dim_t M, const dim_t N, const dim_t K, const data_t *A,
-        const dim_t lda, const data_t *B, const dim_t ldb, data_t *C,
-        const dim_t ldc, const data_t alpha, const data_t beta,
-        const dim_t m, const dim_t n) {
-    dim_t Nu = rnd_dn(N, n);
-    dim_t Mu = rnd_dn(M, m);
-    for (dim_t i = 0; i < Mu; i += m) {
-        for (dim_t j = 0; j < Nu; j += n) {
-            const data_t *b = isTransB ? &B[j] : &B[j * ldb];
-            const data_t *a = isTransA ? &A[i * lda] : &A[i];
-            kernel_mxn<data_t, isTransA, isTransB>(
-                K, a, lda, b, ldb, &C[i + j * ldc], ldc, alpha, beta);
+void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,
+    int ii, int jj, int kk, const size_t A, const size_t B, const size_t C, float ALPHA, int M, int N, 
+    int K,  int lda,int ldb,int ldc)
+{
+    const gpr_t gvl = tmp.pick();
+    const gpr_t vlen = tmp.pick();
+
+    const gpr_t a_index = tmp.pick();
+    const gpr_t b_index = tmp.pick();
+    const gpr_t c_index = tmp.pick();
+    const gpr_t a_index1 = tmp.pick();
+    const gpr_t a_index2 = tmp.pick();
+    const gpr_t a_index3 = tmp.pick();
+
+    const vr_t vc = vout[0], vc1 = vout[1], vc2 = vout[2], vc3 = vout[3];
+    const vr_t vc4 = vout[4], vc5 = vout[5], vc6 = vout[6], vc7 = vout[7];
+    const vr_t vc8 = vout[8], vc9 = vout[9], vc10 = vout[10], vc11 = vout[11];
+    const vr_t vc12 = vout[12], vc13 = vout[13], vc14 = vout[14], vc15 = vout[15];
+    const vr_t vaalpha = vout[16], vaalpha1 = vout[17], vaalpha2 = vout[18];
+    const vr_t vaalpha3 = vout[19], vaalpha4 = vout[20], vaalpha5 = vout[21];
+    const vr_t vaalpha6 = vout[22], vaalpha7 = vout[23], vaalpha8 = vout[24];
+    const vr_t vaalpha9 = vout[25], vaalpha10 = vout[26], vaalpha11 = vout[27];
+    const vr_t vaalpha12 = vout[28], vaalpha13 = vout[29], vaalpha14 = vout[30];
+    const vr_t vaalpha15 = vout[31];
+    vr_t vb;
+
+    vtype_t sew = e32;
+    vsetvli(gvl, vlen, sew | vlmul(1)); 
+    int i1=ii, j1=jj, k1=kk;
+    int i=0,j=0,k=0;
+    for ( j = 0; j < N; ) {
+    for (i = 0; i < M-15; i += 16) {
+
+        load_constant(c_index, C+((i+i1)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc, c_index);
+
+        load_constant(c_index, C+((i+i1+1)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc1, c_index);
+
+        load_constant(c_index, C+((i+i1+2)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc2, c_index);
+
+        load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc3, c_index);
+
+        load_constant(c_index, C+((i+i1+4)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc4, c_index);
+
+        load_constant(c_index, C+((i+i1+5)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc5, c_index);
+
+        load_constant(c_index, C+((i+i1+6)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc6, c_index);
+
+        load_constant(c_index, C+((i+i1+7)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc7, c_index);
+
+        load_constant(c_index, C+((i+i1+8)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc8, c_index);
+
+        load_constant(c_index, C+((i+i1+9)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc9, c_index);
+
+        load_constant(c_index, C+((i+i1+10)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc10, c_index);
+
+        load_constant(c_index, C+((i+i1+11)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc11, c_index);
+
+        load_constant(c_index, C+((i+i1+12)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc12, c_index);
+
+        load_constant(c_index, C+((i+i1+13)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc13, c_index);
+
+        load_constant(c_index, C+((i+i1+14)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc14, c_index);
+
+        load_constant(c_index, C+((i+i1+15)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc15, c_index);
+      
+        for ( k = 0; k < K; k ++) {
+            vb = vout[31]; // Using last register for B
+
+            load_constant(b_index, B+(((k+(K*(j/ldb)))*ldb)+0)*sizeof(float));
+            vle32(vb, b_index);
+            load_constant(a_index, A+(i+lda*k)*sizeof(float));
+            vle32(vaalpha, a_index);
+            vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+1)+lda*k)*sizeof(float));
+            vle32(vaalpha1, a_index);
+            vfmacc_vv(vc1, vaalpha1, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+2)+lda*k)*sizeof(float));
+            vle32(vaalpha2, a_index);
+            vfmacc_vv(vc2, vaalpha2, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+3)+lda*k)*sizeof(float));
+            vle32(vaalpha3, a_index);
+            vfmacc_vv(vc3, vaalpha3, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+4)+lda*k)*sizeof(float));
+            vle32(vaalpha4, a_index);
+            vfmacc_vv(vc4, vaalpha4, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+5)+lda*k)*sizeof(float));
+            vle32(vaalpha5, a_index);
+            vfmacc_vv(vc5, vaalpha5, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+6)+lda*k)*sizeof(float));
+            vle32(vaalpha6, a_index);
+            vfmacc_vv(vc6, vaalpha6, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+7)+lda*k)*sizeof(float));
+            vle32(vaalpha7, a_index);
+            vfmacc_vv(vc7, vaalpha7, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+8)+lda*k)*sizeof(float));
+            vle32(vaalpha8, a_index);
+            vfmacc_vv(vc8, vaalpha8, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+9)+lda*k)*sizeof(float));
+            vle32(vaalpha9, a_index);
+            vfmacc_vv(vc9, vaalpha9, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+10)+lda*k)*sizeof(float));
+            vle32(vaalpha10, a_index);
+            vfmacc_vv(vc10, vaalpha10, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+11)+lda*k)*sizeof(float));
+            vle32(vaalpha11, a_index);
+            vfmacc_vv(vc11, vaalpha11, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+12)+lda*k)*sizeof(float));
+            vle32(vaalpha12, a_index);
+            vfmacc_vv(vc12, vaalpha12, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+13)+lda*k)*sizeof(float));
+            vle32(vaalpha13, a_index);
+            vfmacc_vv(vc13, vaalpha13, vb); // sum += ALPHA*A*B
+            load_constant(a_index, A+((i+14)+lda*k)*sizeof(float));
+            vle32(vaalpha14, a_index);
+            vfmacc_vv(vc14, vaalpha14, vb); // sum += ALPHA*A*B
+            vb = vout[16]; // Switch to 16th register for B due to register amount
+            load_constant(b_index, B+(((k+(K*(j/ldb)))*ldb)+0)*sizeof(float));
+            vle32(vb, b_index);
+            load_constant(a_index, A+((i+15)+lda*k)*sizeof(float));
+            vle32(vaalpha15, a_index);
+            vfmacc_vv(vc15, vaalpha15, vb); // sum += ALPHA*A*B  
             
+        } 
+            load_constant(c_index, C+((i+i1)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc, c_index);
+            load_constant(c_index, C+((i+i1+1)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc1, c_index);
+            load_constant(c_index, C+((i+i1+2)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc2, c_index);
+            load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc3, c_index);
+            load_constant(c_index, C+((i+i1+4)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc4, c_index);
+            load_constant(c_index, C+((i+i1+5)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc5, c_index);
+            load_constant(c_index, C+((i+i1+6)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc6, c_index);
+            load_constant(c_index, C+((i+i1+7)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc7, c_index);
+            load_constant(c_index, C+((i+i1+8)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc8, c_index);
+            load_constant(c_index, C+((i+i1+9)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc9, c_index);
+            load_constant(c_index, C+((i+i1+10)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc10, c_index);
+            load_constant(c_index, C+((i+i1+11)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc11, c_index);
+            load_constant(c_index, C+((i+i1+12)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc12, c_index);
+            load_constant(c_index, C+((i+i1+13)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc13, c_index);
+            load_constant(c_index, C+((i+i1+14)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc14, c_index);
+            load_constant(c_index, C+((i+i1+15)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc15, c_index);
+
         }
+    j += cfg.vlen;
     }
-    // tail processing
-    for (dim_t i = 0; i < M; i++) {
-        for (dim_t j = Nu; j < N; j++) {
-            data_t c = beta == static_cast<data_t>(0.) ? static_cast<data_t>(0.)
-                                                       : beta * C[i + j * ldc];
-            for (dim_t p = 0; p < K; p++) {
-                data_t b = isTransB ? B[j + p * ldb] : B[p + j * ldb];
-                data_t a = isTransA ? A[p + i * lda] : A[i + p * lda];
-                c += alpha * a * b;
+
+    int i_left=i;
+    //itr=0;
+    for (int j = 0; j < N; ) {
+        for (i=i_left; i < M; i += 4) {    // change according to unroll degree
+        load_constant(c_index, C+((i+i1)*ldc+(j+j1)*sizeof(float)));
+        vle32(vc, c_index);
+        if(i + 1 < M) {
+            load_constant(c_index, C+((i+i1+1)*ldc+(j+j1)*sizeof(float)));
+            vle32(vc1, c_index);
+        }
+        if(i + 2 < M) {
+            load_constant(c_index, C+((i+i1+2)*ldc+(j+j1)*sizeof(float)));
+            vle32(vc2, c_index);
+        }
+        if(i + 3 < M) {
+            load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float)));
+            vle32(vc3, c_index);
+        }
+        for (int k = 0; k < K; k ++) {
+                load_constant(a_index, A+(i+lda*k)*sizeof(float));
+                if (i+1 < M) {load_constant(a_index1, A+(i+1+lda*k)*sizeof(float));}
+                if (i+2 < M) {load_constant(a_index2, A+(i+2+lda*k)*sizeof(float));}
+                if (i+3 < M) {load_constant(a_index3, A+(i+3+lda*k)*sizeof(float));}
+
+                vle32(vaalpha, a_index);
+                if (i+1 < M) {vle32(vaalpha1, a_index1);}
+                if (i+2 < M) {vle32(vaalpha2, a_index2);} // ALPHA*A
+                if (i+3 < M) {vle32(vaalpha3, a_index3);} // ALPHA*A
+
+                load_constant(b_index, B+(((k+(K*(j/ldb)))*ldb)+0)*sizeof(float));
+                vle32(vb, b_index);
+                vfmacc_vv(vc, vaalpha, vb);
+                if (i+1 < M) {vfmacc_vv(vc1, vaalpha1, vb);} // sum += ALPHA*A*B
+                if (i+2 < M) {vfmacc_vv(vc2, vaalpha2, vb);} // sum += ALPHA*A*B
+                if (i+3 < M) {vfmacc_vv(vc3, vaalpha3, vb);}// sum += ALPHA*A*B
             }
-            C[i + j * ldc] = c;
+            load_constant(c_index, C+((i+i1)*ldc+(j+j1)*sizeof(float)));
+            vse32(vc, c_index);
+            if (i+1 < M) {load_constant(c_index, C+((i+i1+1)*ldc+(j+j1)*sizeof(float))); vse32(vc1, c_index);}
+            if (i+2 < M) {load_constant(c_index, C+((i+i1+2)*ldc+(j+j1)*sizeof(float))); vse32(vc2, c_index);}
+            if (i+3 < M) {load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float))); vse32(vc3, c_index);}
         }
-    }
-    for (dim_t i = Mu; i < M; i++) {
-        for (dim_t j = 0; j < Nu; j++) {
-            data_t c = beta == static_cast<data_t>(0.) ? static_cast<data_t>(0.)
-                                                       : beta * C[i + j * ldc];
-            for (dim_t p = 0; p < K; p++) {
-                data_t b = isTransB ? B[j + p * ldb] : B[p + j * ldb];
-                data_t a = isTransA ? A[p + i * lda] : A[i + p * lda];
-                c += alpha * a * b;
-            }
-            C[i + j * ldc] = c;
-        }
-    }
+        j += cfg.vlen;
+  }
 }
 
-// Purpose: The top-level function for the GEMM computation. The function
-// It partitions the input matrices into blocks and calls the block_ker function
-template <typename data_t, bool isTransA, bool isTransB>
-void gemm_ithr(const dim_t M, const dim_t N, const dim_t K, const data_t alpha,
-        const data_t *A, const dim_t lda, const data_t *B, const dim_t ldb,
-        const data_t beta, data_t *C, const dim_t ldc,
-        const dim_t BM, const dim_t BN, const dim_t BK) {
-
-    const data_t *curA;
-    const data_t *curB;
-    data_t *curC;
-
-    if ((M <= 0) || (N <= 0)) return;
-
-    if ((K <= 0) || (alpha == static_cast<data_t>(0))) {
-        dim_t MN = N * M;
-        if (beta == static_cast<data_t>(0.)) {
-            for (dim_t j = 0; j < MN; j++)
-                C[j] = static_cast<data_t>(0.);
-        } else if (beta != static_cast<data_t>(1.)) {
-            for (dim_t j = 0; j < MN; j++)
-                C[j] *= beta;
-        }
-        return;
-    }
-
-    for (dim_t Bk = 0; Bk < K; Bk += BK) {
-        dim_t kb = nstl::min(K - Bk, BK);
-        for (dim_t Bm = 0; Bm < M; Bm += BM) {
-            dim_t mb = nstl::min(M - Bm, BM);
-            for (dim_t Bn = 0; Bn < N; Bn += BN) {
-                dim_t nb = nstl::min(N - Bn, BN);
-                curA = isTransA ? A + Bk + Bm * lda : A + Bm + Bk * lda;
-                curB = isTransB ? B + Bn + Bk * ldb : B + Bk + Bn * ldb;
-                curC = C + Bm + Bn * ldc;
-                if (Bk == 0) {
-                    block_ker<data_t, isTransA, isTransB>(mb, nb, kb, curA, lda,
-                            curB, ldb, curC, ldc, alpha, beta);
-                } else {
-                    block_ker<data_t, isTransA, isTransB>(mb, nb, kb, curA, lda,
-                            curB, ldb, curC, ldc, alpha,
-                            static_cast<data_t>(1.0));
-                }
-            }
+void jit_convolution_kernel_t::gemm_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,
+        int TA, int TB, int M, int N, int K, float ALPHA, 
+        float *A, int lda, 
+        float *B, int ldb,
+        float BETA,
+        float *C, int ldc)
+{
+    //printf("cpu: %d %d %d %d %d %f %d %d %f %d\n",TA, TB, M, N, K, ALPHA, lda, ldb, BETA, ldc);
+    int i, j;
+    for(i = 0; i < M; ++i){
+        for(j = 0; j < N; ++j){
+            C[i*ldc + j] *= BETA;
         }
     }
+    if(!TA && !TB)
+    {
+    /*** 3-loop implementation */
+	gemm_nn_unroll16(M, N, K, ALPHA,A,lda, B, ldb,C,ldc);
+    }/*
+    else if(TA && !TB)
+        gemm_tn(M, N, K, ALPHA,A,lda, B, ldb,C,ldc);
+    else if(!TA && TB)
+        gemm_nt(M, N, K, ALPHA,A,lda, B, ldb,C,ldc);
+    else
+        gemm_tt(M, N, K, ALPHA,A,lda, B, ldb,C,ldc);*/
 }
 
-} // namespace
-
-// Reference GEMM is located in oneDNN/src/cpu/gemm/f32/ref_gemm_f32.cpp
-// This code is compiled with sequential execution in mind
-template <typename data_t>
-dnnl_status_t gemm(const char *transa_, const char *transb_,
-    const dim_t *M_, const dim_t *N_, const dim_t *K_, const data_t *alpha_,
-    const data_t *A, const dim_t *lda_, const data_t *B, const dim_t *ldb_,
-    const data_t *beta_, data_t *C, const dim_t *ldc_, const data_t *bias){
-
-    if (!(utils::one_of(*transa_, 'n', 'N', 't', 'T')
-                && utils::one_of(*transb_, 'n', 'N', 't', 'T')))
-        return dnnl_unimplemented;
-
-    bool isTransA = (*transa_ == 'T' || *transa_ == 't');
-    bool isTransB = (*transb_ == 'T' || *transb_ == 't');
-    const dim_t M = *M_, N = *N_, K = *K_;
-    const dim_t lda = *lda_, ldb = *ldb_, ldc = *ldc_;
-    const data_t alpha = *alpha_, beta = *beta_;
-
-    // early out and avoid division by zero
-    if (utils::one_of(0, M, N)) return dnnl_success;
-
-    if (!isTransA) {
-        if (!isTransB) {
-            gemm_ithr<data_t, false, false>(M, N, K, alpha, A,
-                    lda, B, ldb, beta, C, ldc);
-        } else {
-            gemm_ithr<data_t, false, true>(M, N, K, alpha, A,
-                    lda, B, ldb, beta, C, ldc);
-        }
-    } else {
-        if (!isTransB) {
-            gemm_ithr<data_t, true, false>(M, N, K, alpha, A,
-                    lda, B, ldb, beta, C, ldc);
-        } else {
-            gemm_ithr<data_t, true, true>(M, N, K, alpha, A,
-                    lda, B, ldb, beta, C, ldc);
-        }
-    }
-    if (bias) {
-        for(int i = 0; i < M; ++i){
-            for(int j = 0; j < N; ++j){
-                C[i*ldc + j] *= beta;
-            }
-        }
-    }
-
+void jit_convolution_kernel_t::code(convolution_schedule_t::jit_conv_kernel_args_t kargs){
     
-    return dnnl_success;
+    const int oh = cfg.oh; // output height
+    const int ow = cfg.ow; // output width
+    const int ih = cfg.ih; // input height
+    const int iw = cfg.iw; // input width
+    const int kh = cfg.kh; // kernel height
+    const int kw = cfg.kw; // kernel width
+    const int oc = cfg.oc; // output channels
+    const int ic = cfg.ic; // input channels
+    const int stride_h = cfg.stride_h; // stride height
+    const int stride_w = cfg.stride_w; // stride width
+    const int l_pad = cfg.l_pad; // left padding
+    const int t_pad = cfg.t_pad; // top padding
+
+    const int nvregs = traits.erbw * traits.erbc;
+    const size_t wei_sew = types::data_type_size(cfg.wei_dt);
+    const size_t bia_sew = cfg.with_bias ? types::data_type_size(cfg.bias_dt) : 0;
+    const size_t src_sew = types::data_type_size(cfg.src_dt);
+    const size_t dst_sew = types::data_type_size(cfg.dst_dt);
+    
+    // Offset to output pointer field in kernel args structure
+    //const auto args_dst_ptr = offsetof(jit_conv_kernel_args_t, dst);
+    //const auto args_src_ptr = offsetof(jit_conv_kernel_args_t, src);
+    size_t src_addr = reinterpret_cast<size_t>(kargs.src);
+    size_t dst_addr = reinterpret_cast<size_t>(kargs.dst);
+    
+    /// Output register block
+    vr_t vout[32];
+    for (int i = 0; i < nvregs; ++i)
+        vout[i] = static_cast<vr_t>(i);
+    /// Pool of available caller-saved general purpose registers
+    register_pool_t tmp_pool({t0,t1,t2,t3,t4,t5,t6,a7,a6,a5,a4,a3,a2,a1});
+    im2col_cpu(vout, nvregs, tmp_pool, src_addr, dst_addr, ic, ih, iw, kh, stride_h, l_pad);
     
 }
 
-
+/*
 void jit_convolution_kernel_t::code() {
-    /*
-    const dim_t oh = cfg.oh; // output height
-    const dim_t ow = cfg.ow; // output width
-    const dim_t ih = cfg.ih; // input height
-    const dim_t iw = cfg.iw; // input width
-    const dim_t kh = cfg.kh; // kernel height
-    const dim_t kw = cfg.kw; // kernel width
-    const dim_t oc = cfg.oc; // output channels
-    const dim_t ic = cfg.ic; // input channels
-    const dim_t stride_h = cfg.stride_h; // stride height
-    const dim_t stride_w = cfg.stride_w; // stride width
-    const dim_t l_pad = cfg.l_pad; // left padding
-    const dim_t t_pad = cfg.t_pad; // top padding
-    */
+    
     const int nvregs = traits.erbw * traits.erbc;
     const size_t wei_sew = types::data_type_size(cfg.wei_dt);
     const size_t bia_sew = cfg.with_bias ? types::data_type_size(cfg.bias_dt) : 0;
@@ -503,7 +590,7 @@ void jit_convolution_kernel_t::code() {
     ret();
 
 }
-
+*/
 
 
 int
