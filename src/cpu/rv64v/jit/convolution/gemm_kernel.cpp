@@ -73,12 +73,10 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
     vsetvli(gvl, vlen, sew | vlmul(1));
     const int channels_col = channels * ksize * ksize;
     // initialize channels register
-    const gpr_t channel = tmp.pick();
-    load_constant(channel, channels_col);
     c = 0;
+    const gpr_t channel = tmp.pick();
     if (channels_col > 1)   load_constant(channel, channels_col);
     L("channels");
-    
     //for (c = 0; c < channels_col; ++c) {
     int w_offset = c % ksize;
     load_constant(w_reg, w_offset);
@@ -191,7 +189,6 @@ void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, r
     int ii, int jj, int kk, const size_t A, const size_t B, const size_t C, float ALPHA, int M, int N, 
     int K,  int lda,int ldb,int ldc)
 {
-    std::cout << "Entered JIT gemm_nn_unroll16" << std::endl;
     const gpr_t gvl = tmp.pick();
     const gpr_t vlen = tmp.pick();
 
@@ -218,6 +215,7 @@ void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, r
     vsetvli(gvl, vlen, sew | vlmul(1)); 
     int i1=ii, j1=jj, k1=kk;
     int i=0,j=0,k=0;
+    
     for ( j = 0; j < N; j += cfg.vlen) {
     for (i = 0; i < M-15; i += 16) {
 
@@ -422,53 +420,76 @@ void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, regi
     const gpr_t vlen = tmp.pick();
     load_constant(vlen, cfg.vlen);
     //vsetvli(ld, vlen, e32 | vlmul(1));
-    long gvl;
+    long gvl = cfg.vlen;;
     const vr_t tmp_reg = vout[0];
     const gpr_t b_index = tmp.pick();
     const gpr_t bT_index = tmp.pick();
     const gpr_t a_index = tmp.pick();
     const gpr_t aT_index = tmp.pick();
-    gvl = cfg.vlen;
+    
+    const gpr_t j_loop = tmp.pick();
+    const gpr_t N_reg = tmp.pick();
 
-    for (jj = 0; jj < N; jj+=BlockN) {
-        int Nc = ((jj+BlockN>N)?(N-jj):(BlockN));
-        for (kk = 0; kk < K; kk+=BlockK) {
-            int Kc = ((kk+BlockK > K)?(K-kk):(BlockK));
-            int itr=0;
-            for(int j=0;j<Nc;){
-                for(int k=0;k<Kc;k++){
+    const gpr_t k_loop = tmp.pick();
+    const gpr_t K_reg = tmp.pick();
+    jj = 0;
+    kk = 0;
+    load_constant(N_reg, N);
+    if (N > 1)   load_constant(j_loop, 0);
+    L("jj"); 
+    //for (jj = 0; jj < N; jj+=BlockN) {
+    int Nc = ((jj+BlockN>N)?(N-jj):(BlockN));
+    load_constant(K_reg, K);
+    if (K > 1)   load_constant(k_loop, 0);
+    L("kk");
 
-                    //      transposeB[k*Kc+j] = B[(k+kk)*ldb+(j+jj)];
-                    //__epi_2xf32 tmp = __builtin_epi_vload_2xf32( &B[(k+kk)*ldb+(j+jj)], gvl);
-                    load_constant(b_index, B+(k+kk)*ldb+(j+jj)*sizeof(float));
-                    vle32(tmp_reg, b_index);
-                    //svst1(pg, &transposeB[((k+(Kc*itr))*ld)+0], tmp);
-                    //__builtin_epi_vstore_2xf32( &transposeB[((k+(Kc*(j/ld)))*ld)+0], tmp, gvl);
-                    load_constant(bT_index, (((k+(Kc*(j/ld)))*ld)+0)*sizeof(float));
-                    vse32(tmp_reg, bT_index);
-                    //transposeB[k*Nc+j] = B[(k+kk)*ldb+(j+jj)];
-                }
-                itr++;
-                j+=gvl;
+    //for (kk = 0; kk < K; kk+=BlockK) {
+        int Kc = ((kk+BlockK > K)?(K-kk):(BlockK));
+        int itr=0;
+        for(int j=0;j<Nc;){
+            for(int k=0;k<Kc;k++){
+
+                //      transposeB[k*Kc+j] = B[(k+kk)*ldb+(j+jj)];
+                //__epi_2xf32 tmp = __builtin_epi_vload_2xf32( &B[(k+kk)*ldb+(j+jj)], gvl);
+                load_constant(b_index, B+(k+kk)*ldb+(j+jj)*sizeof(float));
+                vle32(tmp_reg, b_index);
+                //svst1(pg, &transposeB[((k+(Kc*itr))*ld)+0], tmp);
+                //__builtin_epi_vstore_2xf32( &transposeB[((k+(Kc*(j/ld)))*ld)+0], tmp, gvl);
+                load_constant(bT_index, (((k+(Kc*(j/ld)))*ld)+0)*sizeof(float));
+                vse32(tmp_reg, bT_index);
+                //transposeB[k*Nc+j] = B[(k+kk)*ldb+(j+jj)];
             }
-            for (ii = 0; ii < M; ii+=BlockM) {
-            int Mc = ((ii+BlockM >M)?(M-ii):(BlockM)) ;
-
-            int itr1=0;
-            for(int i=0;i<Mc;i++){
-                for(int k=0;k<Kc;k++){
-                    //      	__epi_2xf32 tmp = __builtin_epi_vload_2xf32(&A[(i+ii)*lda+(k+kk)], gvl);
-                    //    	__builtin_epi_vstore_strided_2xf32(&transposeA[k*Mc+i], tmp, Mc*4, gvl);
-                    //transposeA[k*Mc+i] = A[(i+ii)*lda+(k+kk)];
-                    load_constant(a_index, A+((i+ii)*lda+(k+kk))*sizeof(float));
-                    load_constant(aT_index, (k*Mc+i)*sizeof(float));
-                    vle32(tmp_reg, a_index);
-                    vse32(tmp_reg, aT_index);
-                    }
-                }
-                gemm_nn_unroll16(vout, nvregs, tmp, ii,jj,kk,transposeA,transposeB, C,ALPHA, Mc,Nc, Kc, Mc,ld,ldc);
-            }
+            itr++;
+            j+=gvl;
         }
+        for (ii = 0; ii < M; ii+=BlockM) {
+        int Mc = ((ii+BlockM >M)?(M-ii):(BlockM)) ;
+
+        int itr1=0;
+        for(int i=0;i<Mc;i++){
+            for(int k=0;k<Kc;k++){
+                //      	__epi_2xf32 tmp = __builtin_epi_vload_2xf32(&A[(i+ii)*lda+(k+kk)], gvl);
+                //    	__builtin_epi_vstore_strided_2xf32(&transposeA[k*Mc+i], tmp, Mc*4, gvl);
+                //transposeA[k*Mc+i] = A[(i+ii)*lda+(k+kk)];
+                load_constant(a_index, A+((i+ii)*lda+(k+kk))*sizeof(float));
+                load_constant(aT_index, (k*Mc+i)*sizeof(float));
+                vle32(tmp_reg, a_index);
+                vse32(tmp_reg, aT_index);
+                }
+            }
+            gemm_nn_unroll16(vout, nvregs, tmp, ii,jj,kk,transposeA,transposeB, C,ALPHA, Mc,Nc, Kc, Mc,ld,ldc);
+        }
+    //}
+    if (kk < K){
+        kk+=BlockK;
+        addi(k_loop, k_loop, BlockK);
+        blt(k_loop, K_reg, "kk");
+    }
+    //}
+    if (jj < N){
+        jj+=BlockN;
+        addi(j_loop, j_loop, BlockN);
+        blt(j_loop, N_reg, "jj");
     }
 }
 
@@ -479,7 +500,6 @@ void jit_convolution_kernel_t::gemm_cpu(rvjit::vr_t *vout, int nvregs, register_
         float BETA,
         size_t C, int ldc)
 {
-    std::cout << "Enter GEMM CPU" << std::endl;
     if(!TA && !TB)
     {
 	    /*** enable below for the 6-loops packed implementations */
@@ -503,7 +523,6 @@ void jit_convolution_kernel_t::gemm_cpu(rvjit::vr_t *vout, int nvregs, register_
         size_t transposeB_ = reinterpret_cast<size_t>(transposeB);
         size_t transposeA_ = reinterpret_cast<size_t>(transposeA);
         //gemm_nn_original(M,N,K,ALPHA,A, lda,B, ldb, C, ldc);	
-        std::cout << "Calling gemm_nn_pack2" << std::endl;
         gemm_nn_pack2(vout, nvregs, tmp, M, N, K, ALPHA,A, lda, B, ldb,C, ldc, blockM, blockN, blockK, transposeB_, transposeA_);
         delete[] transposeB;
         transposeB = nullptr; // Using nullptr
