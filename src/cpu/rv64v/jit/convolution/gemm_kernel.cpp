@@ -30,7 +30,6 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
     int c,h,w, index; 
     int height_col = (height + 2*pad - ksize) / stride + 1;
     int width_col = (width + 2*pad - ksize) / stride + 1;
-    std::cout << "JIT im2col" << std::endl;
     // register_pool_t tmp_pool({t0,t1,t2,t3,t4,t5,t6,a7,a6,a5,a4,a3,a2,a1});
         
     const gpr_t gvl = tmp.pick();
@@ -65,111 +64,120 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
     const vr_t VAL = vout[18];
     const vr_t dataim = vout[19];
     const vr_t datacol = vout[20];
-    std::cout << cfg.vlen << std::endl;
+
     load_constant(src, data_im);
     load_constant(col, data_col);
     load_constant(vlen, cfg.vlen);
+
     vtype_t sew = e32;
     vsetvli(gvl, vlen, sew | vlmul(1));
-    int channels_col = channels * ksize * ksize;
-    for (c = 0; c < channels_col; ++c) {
-        std::cout << "c: " << c << "/" << channels_col << std::endl;
-        int w_offset = c % ksize;
-        load_constant(w_reg, w_offset);
-        int h_offset = (c / ksize) % ksize;
-        int c_im = c / ksize / ksize;
-        for (h = 0; h < height_col; ++h) {
-            int im_row = h_offset + h * stride;
-            int intermediate = (c * height_col + h);
-            load_constant(intermediate_reg, intermediate);
-            im_row -= pad;
-            int val = width*(im_row + height*c_im);
-            load_constant(val_reg, val);
-            for (w = 0; w < width_col; w += cfg.vlen) {           
-                //Index calculation
-                load_constant(tmp1, w);
-                vle32(wcol, tmp1); // load
-                vmv_sx(OFFSET, w_reg); // broadcast
-                load_constant(tmp1, pad);
-                vmv_sx(PAD, tmp1); //broadcast
-                load_constant(tmp1, stride);
-                vmv_sx(STRIDE, tmp1); //broadcast
+    const int channels_col = channels * ksize * ksize;
+    // initialize channels register
+    const gpr_t channel = tmp.pick();
+    load_constant(channel, channels_col);
+    if (channels_col > 1)   load_constant(channel, channels_col);
+    l("channels");
 
-                vmul_vv(intermediate1, STRIDE, wcol); // multiplication
-                vadd_vv(imcol, intermediate1, OFFSET); // addition
+    //for (c = 0; c < channels_col; ++c) {
+    int w_offset = c % ksize;
+    load_constant(w_reg, w_offset);
+    int h_offset = (c / ksize) % ksize;
+    int c_im = c / ksize / ksize;
+    for (h = 0; h < height_col; ++h) {
+        int im_row = h_offset + h * stride;
+        int intermediate = (c * height_col + h);
+        load_constant(intermediate_reg, intermediate);
+        im_row -= pad;
+        int val = width*(im_row + height*c_im);
+        load_constant(val_reg, val);
+        for (w = 0; w < width_col; w += cfg.vlen) {   
+            //Index calculation
+            load_constant(tmp1, w);
+            vle32(wcol, tmp1); // load
+            vmv_sx(OFFSET, w_reg); // broadcast
+            load_constant(tmp1, pad);
+            vmv_sx(PAD, tmp1); //broadcast
+            load_constant(tmp1, stride);
+            vmv_sx(STRIDE, tmp1); //broadcast
 
-                load_constant(tmp1, width_col);
-                vmv_sx(WIDTHCOL, tmp1); //broadcast
+            vmul_vv(intermediate1, STRIDE, wcol); // multiplication
+            vadd_vv(imcol, intermediate1, OFFSET); // addition
 
-                vmv_sx(INTER, intermediate_reg); //broadcast
-               
-                vmul_vv(intermediate2, INTER, WIDTHCOL); // multiplication
+            load_constant(tmp1, width_col);
+            vmv_sx(WIDTHCOL, tmp1); //broadcast
 
-                vadd_vv(colindex, intermediate2, wcol); // addition
+            vmv_sx(INTER, intermediate_reg); //broadcast
+            
+            vmul_vv(intermediate2, INTER, WIDTHCOL); // multiplication
 
-                vsub_vv(imcol, imcol, PAD); // subtract
+            vadd_vv(colindex, intermediate2, wcol); // addition
 
-                //broadcast for conditional statement
-                load_constant(tmp1, width);
-                vmv_sx(WIDTH, tmp1); //broadcast
+            vsub_vv(imcol, imcol, PAD); // subtract
 
-                load_constant(tmp1, height);
-                vmv_sx(HEIGHT, tmp1); //broadcasts
+            //broadcast for conditional statement
+            load_constant(tmp1, width);
+            vmv_sx(WIDTH, tmp1); //broadcast
 
-                load_constant(tmp1, c_im);
-                vmv_sx(CIM, tmp1); //broadcast
+            load_constant(tmp1, height);
+            vmv_sx(HEIGHT, tmp1); //broadcasts
 
-                load_constant(tmp1, im_row);
-                vmv_sx(imrow, tmp1); //broadcast
+            load_constant(tmp1, c_im);
+            vmv_sx(CIM, tmp1); //broadcast
 
-                //Broadcast 4 for index calculation (index*4 for float 32bit)
-                //int l = 4;
-                load_constant(four, 4);
-                vmv_sx(FOUR, four); //broadcast
+            load_constant(tmp1, im_row);
+            vmv_sx(imrow, tmp1); //broadcast
 
-                int z=0;
-                float z1=0.0;
-                
-                load_constant(tmp2, z); 
-                vfsub_vv(XERO1, XERO1, XERO1); // set XERO1 to 0.0
-                vmv_sx(XERO, tmp2); //broadcast
+            //Broadcast 4 for index calculation (index*4 for float 32bit)
+            //int l = 4;
+            load_constant(four, 4);
+            vmv_sx(FOUR, four); //broadcast
 
-                //Calculate mask
-                vmask_t colmask, colmask1, colmask2;
-                vmask_t rowmask, rowmask1, rowmask2;
-                vmask_t mask, mask1, mask2, mask3, mask4;
+            int z=0;
+            float z1=0.0;
+            
+            load_constant(tmp2, z); 
+            vfsub_vv(XERO1, XERO1, XERO1); // set XERO1 to 0.0
+            vmv_sx(XERO, tmp2); //broadcast
 
-                vmsgt_vx(colmask, imcol, XERO);
-                vmslt_vx(colmask1, imcol, WIDTH);
-                vmseq_vv(colmask2, imcol, XERO);
+            //Calculate mask
+            vmask_t colmask, colmask1, colmask2;
+            vmask_t rowmask, rowmask1, rowmask2;
+            vmask_t mask, mask1, mask2, mask3, mask4;
 
-                vmsgt_vx(rowmask, imrow, XERO);
-                vmslt_vx(rowmask1, imrow, HEIGHT);
-                vmseq_vv(rowmask2, imrow, XERO);
-                
-                vmand_mm(mask, rowmask1, colmask1);
-                vmor_mm(mask1, colmask, colmask2);
-                vmor_mm(mask2, rowmask, rowmask2);
-                vmand_mm(mask3, mask1, mask2);
-                vmand_mm(mask4, mask, mask3);
+            vmsgt_vx(colmask, imcol, XERO);
+            vmslt_vx(colmask1, imcol, WIDTH);
+            vmseq_vv(colmask2, imcol, XERO);
 
-                //Calculate val+imcol for final index
-                vmv_vx(intermediate5, val_reg);
-                vadd_vv(VAL, imcol, intermediate5, mask4);
+            vmsgt_vx(rowmask, imrow, XERO);
+            vmslt_vx(rowmask1, imrow, HEIGHT);
+            vmseq_vv(rowmask2, imrow, XERO);
+            
+            vmand_mm(mask, rowmask1, colmask1);
+            vmor_mm(mask1, colmask, colmask2);
+            vmor_mm(mask2, rowmask, rowmask2);
+            vmand_mm(mask3, mask1, mask2);
+            vmand_mm(mask4, mask, mask3);
 
-                //Index multiply with 4
-                vmul_vv(VAL, VAL, FOUR);
-                vmul_vv(colindex, colindex, FOUR);
+            //Calculate val+imcol for final index
+            vmv_vx(intermediate5, val_reg);
+            vadd_vv(VAL, imcol, intermediate5, mask4);
 
-                //vload with indexed mask
-                vlox(dataim, src, VAL, mask4);
-                //store with index
-                vsox(datacol, col, colindex, mask4);
-                //w += cfg.vlen;//gvl;
-                
-                }
+            //Index multiply with 4
+            vmul_vv(VAL, VAL, FOUR);
+            vmul_vv(colindex, colindex, FOUR);
 
-        }
+            //vload with indexed mask
+            vlox(dataim, src, VAL, mask4);
+            //store with index
+            vsox(datacol, col, colindex, mask4);
+            //w += cfg.vlen;//gvl;
+            
+            }
+
+    }
+    if (channel > 1) {
+        addi(channel, channel, -1);
+        bnez(channel, "channels");
     }
 }
 
@@ -208,7 +216,7 @@ void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, r
     vsetvli(gvl, vlen, sew | vlmul(1)); 
     int i1=ii, j1=jj, k1=kk;
     int i=0,j=0,k=0;
-    for ( j = 0; j < N; ) {
+    for ( j = 0; j < N; j += cfg.vlen) {
     for (i = 0; i < M-15; i += 16) {
 
         load_constant(c_index, C+((i+i1)*ldc+(j+j1)*sizeof(float)));
@@ -258,7 +266,6 @@ void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, r
 
         load_constant(c_index, C+((i+i1+15)*ldc+(j+j1)*sizeof(float)));
         vle32(vc15, c_index);
-        #pragma omp parallel for schedule(static)
         for ( k = 0; k < K; k ++) {
             vb = vout[31]; // Using last register for B
 
@@ -350,7 +357,7 @@ void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, r
         load_constant(c_index, C+((i+i1+15)*ldc+(j+j1)*sizeof(float)));
         vse32(vc15, c_index);
     }
-    j += cfg.vlen;
+    
     }
 
     int i_left=i;
@@ -419,6 +426,7 @@ void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, regi
     const gpr_t bT_index = tmp.pick();
     const gpr_t a_index = tmp.pick();
     const gpr_t aT_index = tmp.pick();
+    gvl = cfg.vlen;
 
     for (jj = 0; jj < N; jj+=BlockN) {
         int Nc = ((jj+BlockN>N)?(N-jj):(BlockN));
@@ -426,8 +434,6 @@ void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, regi
             int Kc = ((kk+BlockK > K)?(K-kk):(BlockK));
             int itr=0;
             for(int j=0;j<Nc;){
-                gvl = cfg.vlen;
-
                 for(int k=0;k<Kc;k++){
 
                     //      transposeB[k*Kc+j] = B[(k+kk)*ldb+(j+jj)];
@@ -458,7 +464,6 @@ void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, regi
                     vse32(tmp_reg, aT_index);
                     }
                 }
-                std::cout << "Calling gemm_nn_unroll" << std::endl;
                 gemm_nn_unroll16(vout, nvregs, tmp, ii,jj,kk,transposeA,transposeB, C,ALPHA, Mc,Nc, Kc, Mc,ld,ldc);
             }
         }
@@ -476,9 +481,9 @@ void jit_convolution_kernel_t::gemm_cpu(rvjit::vr_t *vout, int nvregs, register_
     if(!TA && !TB)
     {
 	    /*** enable below for the 6-loops packed implementations */
-        int blockM = std::min(16, M);
-        int blockN = std::min(512, N);
-        int blockK = std::min(128, K);
+        int blockM = std::min(16*2, M);
+        int blockN = std::min(512*2, N);
+        int blockK = std::min(128*2, K);
 
         // Using new to allocate memory
         float* transposeB = new (std::nothrow) float[blockM * blockN * blockK];
@@ -530,7 +535,6 @@ void jit_convolution_kernel_t::code(convolution_schedule_t::jit_conv_kernel_args
     const int l_pad = cfg.l_pad; // left padding
     const int t_pad = cfg.t_pad; // top padding
     const int vlen = cfg.vlen; // vector length
-    std::cout << vlen << std::endl;
     const int nvregs = traits.erbw * traits.erbc;
     const size_t wei_sew = types::data_type_size(cfg.wei_dt);
     const size_t bia_sew = cfg.with_bias ? types::data_type_size(cfg.bias_dt) : 0;
