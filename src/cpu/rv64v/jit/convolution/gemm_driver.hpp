@@ -68,7 +68,7 @@ struct convolution_schedule_t {
         size_t h_loop_size;
         size_t w_loop_size;
         size_t load_partials;
-        size_t bwdd_zrow;
+        //size_t bwdd_zrow;
     };
 
     struct precalculated_args {
@@ -78,7 +78,7 @@ struct convolution_schedule_t {
         size_t bias;
         size_t vlen;
         size_t load_partials;
-        size_t bwdd_zrow;
+        //size_t bwdd_zrow;
         size_t h_loop_size;
         size_t w_loop_size;
     };
@@ -107,7 +107,7 @@ bool pick_memory_formats_from_conf(const jit_convolution_configuration_t &cfg,
 void init_schedule(convolution_schedule_t &s,
                     const jit_convolution_configuration_t &acfg);
 void free_schedule(convolution_schedule_t &s);
-void call_schedule(const convolution_schedule_t &s, int i, int mb,
+void call_schedule(const convolution_schedule_t &s, int mb,
                     const float *dst, const float *src, const float *wei, const float *bias);
 
 } // namespace gemm

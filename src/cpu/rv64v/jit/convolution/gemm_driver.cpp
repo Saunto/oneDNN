@@ -21,8 +21,8 @@ struct schedule_factory_t {
     size_t ntraits;
     size_t traits_capacity;
     size_t calls_capacity;
-    static constexpr int alloc_traits = 32;
-    static constexpr int alloc_calls = 256;
+    static constexpr int alloc_traits = 1;//32;
+    static constexpr int alloc_calls = 1;//256;
 
     schedule_factory_t(convolution_schedule_t &s) : sched(s) {
         traits = new kernel_traits_t[alloc_traits];
@@ -190,6 +190,10 @@ int log2(int x) {
 void schedule_iteration(schedule_factory_t &f,
                         kernel_traits_t t,
                         convolution_schedule_t::precalculated_args &a) {
+
+    std::cout << "Schedule iteration" << std::endl;                        
+    convolution_schedule_t::jit_conv_kernel_args_t kargs;
+
     rvjit::function* handle;
     auto &s = f.sched;
     size_t id = s.NJ;
@@ -212,7 +216,7 @@ void schedule_iteration(schedule_factory_t &f,
             delete [] old_traits;
         }
         id = s.NJ;
-        ker.code();
+        ker.code(kargs);
         s.handles[id] = ker.assemble();
         f.traits[id] = t;
         ++s.NJ;
@@ -245,7 +249,7 @@ void schedule_iteration(schedule_factory_t &f,
     }
     s.calls[s.N] = handle->get<convolution_schedule_t::pkernel_t>();
     s.args[s.N].load_partials = a.load_partials;
-    s.args[s.N].bwdd_zrow = a.bwdd_zrow;
+    //s.args[s.N].bwdd_zrow = a.bwdd_zrow;
     s.args[s.N].h_loop_size = a.h_loop_size;
     s.args[s.N].w_loop_size = a.w_loop_size;
     s.args[s.N].vlen = a.vlen;
@@ -254,10 +258,11 @@ void schedule_iteration(schedule_factory_t &f,
     s.args[s.N].wei = a.wei;
     s.args[s.N].bias = a.bias;
     ++s.N;
+    std::cout << "N: " << s.N << std::endl;
     if (debugmode()) {
         printf("[iteration] ukernel: %p, ", s.calls[s.N-1]);
         printf("load_partials: %ld, ", a.load_partials);
-        printf("bwdd_zrow: %ld, ", a.bwdd_zrow);
+        //printf("bwdd_zrow: %ld, ", a.bwdd_zrow);
         printf("h_loop_size: %ld, ", a.h_loop_size);
         printf("w_loop_size: %ld, ", a.w_loop_size);
         printf("vlen: %ld, ", a.vlen);
@@ -306,7 +311,7 @@ void schedule_fwdd(convolution_schedule_t &s) {
             a.load_partials |= kh > 1 || kw;
         else
             a.load_partials |= kh || kw;
-        a.bwdd_zrow = false;
+        //a.bwdd_zrow = false;
         a.vlen = nstl::min(cfg.vlen, cfg.oc - ocb * cfg.ocb);
         a.h_loop_size = cfg.k_h - (t_pad_overlap + b_pad_overlap);
         a.w_loop_size = cfg.k_w;
@@ -391,13 +396,17 @@ bool init_conf(jit_convolution_configuration_t &out,
     // Decide on software optimizations
     // 1. Define vectorization strategy and vector length
     switch (out.prop_kind) {
-        case prop_kind::forward_inference:
-        case prop_kind::forward: {
+        case prop_kind::forward_inference: {
             out.vdim_is_oc = true;
-            out.vlen = nstl::min(out.oc, out.maxvl);
+            out.vlen = out.maxvl;//nstl::min(out.oc, out.maxvl);
             break;
         }
-        case prop_kind::backward_data: {
+        case prop_kind::forward: {
+            out.vdim_is_oc = true;
+            out.vlen = out.maxvl;//nstl::min(out.oc, out.maxvl);
+            break;
+        }
+        /*case prop_kind::backward_data: {
             out.vdim_is_oc = false;
             out.vlen = nstl::min(out.ic, out.maxvl);
             break;
@@ -406,7 +415,7 @@ bool init_conf(jit_convolution_configuration_t &out,
             out.vdim_is_oc = out.oc >= out.ic;
             out.vlen = nstl::min(out.vdim_is_oc ? out.oc : out.ic, out.maxvl);
             break;
-        }
+        }*/
         default:
             return false;
     }
@@ -612,14 +621,26 @@ bool pick_memory_formats_from_conf(const jit_convolution_configuration_t &cfg,
 void init_schedule(convolution_schedule_t &s,
                     const jit_convolution_configuration_t &acfg) {
     s.cfg = acfg;
+    auto schedule = schedule_factory_t(s);
+    convolution_schedule_t::jit_conv_kernel_args_t kargs;
+    kernel_traits_t t;
+    jit_convolution_kernel_t ker = jit_convolution_kernel_t(s.cfg, t);
+    convolution_schedule_t::precalculated_args a = s.args[0];
     print_config(acfg);
+    rvjit::function* handle;
     switch (acfg.prop_kind) {
         case prop_kind::forward: {
-            schedule_fwdd(s);
+            //schedule_fwdd(s);
+            //ker.code(kargs);
+            //ker.assemble();
+            std::cout << "Schedule im2col" << std::endl;
+            schedule_iteration(schedule, t, a);
             break;
         }
         case prop_kind::forward_inference: {
-            schedule_fwdd(s);
+            //schedule_fwdd(s);
+            std::cout << "Schedule im2col" << std::endl;
+            schedule_iteration(schedule, t, a);
             break;
         }
         default:
@@ -639,20 +660,21 @@ void free_schedule(convolution_schedule_t &s) {
     s.NJ = 0;
 }
 
-void call_schedule(const convolution_schedule_t &s, int i, int mb,
+void call_schedule(const convolution_schedule_t &s, int mb,
 const float *dst, const float *src, const float *wei, const float *bias) {
+    std::cout << "call_schedule" << std::endl;
     convolution_schedule_t::jit_conv_kernel_args_t kargs;
-    convolution_schedule_t::precalculated_args &args = s.args[i];
-    kargs.dst = dst + args.dst;
-    kargs.src = src + args.src;
-    kargs.wei = wei + args.wei;
-    kargs.bias = bias + args.bias;
+    convolution_schedule_t::precalculated_args &args = s.args[0];
+    kargs.dst = dst;// + args.dst;
+    kargs.src = src;// + args.src;
+    kargs.wei = wei;// + args.wei;
+    kargs.bias = bias;// + args.bias;
     kargs.vlen = args.vlen;
     kargs.h_loop_size = args.h_loop_size;
     kargs.w_loop_size = args.w_loop_size;
     kargs.load_partials = args.load_partials
         || (s.cfg.prop_kind == prop_kind::backward_weights ? mb > 0 : false);
-    s.calls[i](kargs);
+    s.calls[0](kargs);
 }
 
 } // namespace gemm

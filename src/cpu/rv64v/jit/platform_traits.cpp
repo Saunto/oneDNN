@@ -7,11 +7,11 @@ namespace cpu {
 namespace rv64 {
 
 int get_platform_maxvl() {
-    return getenv_int("DNNL_RV64_MAXVL", 512*32);
+    return getenv_int("DNNL_RV64_MAXVL", 1024*32);
 }
 
 int get_platform_vcores() {
-    return getenv_int("DNNL_RV64_VCORES", 1);
+    return getenv_int("DNNL_RV64_VCORES", 4);
 }
 
 int get_platform_vector_level_cache_size() {
