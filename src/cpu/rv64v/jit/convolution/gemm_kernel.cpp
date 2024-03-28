@@ -1,6 +1,8 @@
 #include <stddef.h>
 #include <iostream>
 #include <vector>
+#include <cstdlib> 
+#include <algorithm>
 
 #include "common/dnnl_thread.hpp"
 #include "common/utils.hpp"
@@ -63,10 +65,12 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
     const vr_t VAL = vout[18];
     const vr_t dataim = vout[19];
     const vr_t datacol = vout[20];
- 
+    std::cout << cfg.vlen << std::endl;
     load_constant(src, data_im);
     load_constant(col, data_col);
     load_constant(vlen, cfg.vlen);
+    vtype_t sew = e32;
+    vsetvli(gvl, vlen, sew | vlmul(1));
     int channels_col = channels * ksize * ksize;
     for (c = 0; c < channels_col; ++c) {
         std::cout << "c: " << c << "/" << channels_col << std::endl;
@@ -81,14 +85,7 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
             im_row -= pad;
             int val = width*(im_row + height*c_im);
             load_constant(val_reg, val);
-
-            for (w = 0; w < width_col; ) {           
-                unsigned long rvl = ((long)width_col - (long)w);
-                vtype_t sew = e32;
-                vtype_t lmul = m1;
-                unsigned long int max_elements = rvl / sew;
-                vsetvli(gvl, vlen, sew | vlmul(1));
-
+            for (w = 0; w < width_col; w += cfg.vlen) {           
                 //Index calculation
                 load_constant(tmp1, w);
                 vle32(wcol, tmp1); // load
@@ -168,7 +165,7 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
                 vlox(dataim, src, VAL, mask4);
                 //store with index
                 vsox(datacol, col, colindex, mask4);
-                w += cfg.vlen;//gvl;
+                //w += cfg.vlen;//gvl;
                 
                 }
 
@@ -184,6 +181,7 @@ void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, r
     int ii, int jj, int kk, const size_t A, const size_t B, const size_t C, float ALPHA, int M, int N, 
     int K,  int lda,int ldb,int ldc)
 {
+    std::cout << "Entered JIT gemm_nn_unroll16" << std::endl;
     const gpr_t gvl = tmp.pick();
     const gpr_t vlen = tmp.pick();
 
@@ -260,7 +258,7 @@ void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, r
 
         load_constant(c_index, C+((i+i1+15)*ldc+(j+j1)*sizeof(float)));
         vle32(vc15, c_index);
-      
+        #pragma omp parallel for schedule(static)
         for ( k = 0; k < K; k ++) {
             vb = vout[31]; // Using last register for B
 
@@ -319,40 +317,39 @@ void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, r
             vfmacc_vv(vc15, vaalpha15, vb); // sum += ALPHA*A*B  
             
         } 
-            load_constant(c_index, C+((i+i1)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc, c_index);
-            load_constant(c_index, C+((i+i1+1)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc1, c_index);
-            load_constant(c_index, C+((i+i1+2)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc2, c_index);
-            load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc3, c_index);
-            load_constant(c_index, C+((i+i1+4)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc4, c_index);
-            load_constant(c_index, C+((i+i1+5)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc5, c_index);
-            load_constant(c_index, C+((i+i1+6)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc6, c_index);
-            load_constant(c_index, C+((i+i1+7)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc7, c_index);
-            load_constant(c_index, C+((i+i1+8)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc8, c_index);
-            load_constant(c_index, C+((i+i1+9)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc9, c_index);
-            load_constant(c_index, C+((i+i1+10)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc10, c_index);
-            load_constant(c_index, C+((i+i1+11)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc11, c_index);
-            load_constant(c_index, C+((i+i1+12)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc12, c_index);
-            load_constant(c_index, C+((i+i1+13)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc13, c_index);
-            load_constant(c_index, C+((i+i1+14)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc14, c_index);
-            load_constant(c_index, C+((i+i1+15)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc15, c_index);
-
-        }
+        load_constant(c_index, C+((i+i1)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc, c_index);
+        load_constant(c_index, C+((i+i1+1)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc1, c_index);
+        load_constant(c_index, C+((i+i1+2)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc2, c_index);
+        load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc3, c_index);
+        load_constant(c_index, C+((i+i1+4)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc4, c_index);
+        load_constant(c_index, C+((i+i1+5)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc5, c_index);
+        load_constant(c_index, C+((i+i1+6)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc6, c_index);
+        load_constant(c_index, C+((i+i1+7)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc7, c_index);
+        load_constant(c_index, C+((i+i1+8)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc8, c_index);
+        load_constant(c_index, C+((i+i1+9)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc9, c_index);
+        load_constant(c_index, C+((i+i1+10)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc10, c_index);
+        load_constant(c_index, C+((i+i1+11)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc11, c_index);
+        load_constant(c_index, C+((i+i1+12)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc12, c_index);
+        load_constant(c_index, C+((i+i1+13)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc13, c_index);
+        load_constant(c_index, C+((i+i1+14)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc14, c_index);
+        load_constant(c_index, C+((i+i1+15)*ldc+(j+j1)*sizeof(float)));
+        vse32(vc15, c_index);
+    }
     j += cfg.vlen;
     }
 
@@ -374,6 +371,7 @@ void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, r
             load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float)));
             vle32(vc3, c_index);
         }
+        #pragma omp parallel for schedule(static)
         for (int k = 0; k < K; k ++) {
                 load_constant(a_index, A+(i+lda*k)*sizeof(float));
                 if (i+1 < M) {load_constant(a_index1, A+(i+1+lda*k)*sizeof(float));}
@@ -402,24 +400,112 @@ void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, r
   }
 }
 
-void jit_convolution_kernel_t::gemm_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,
-        int TA, int TB, int M, int N, int K, float ALPHA, 
-        float *A, int lda, 
-        float *B, int ldb,
-        float BETA,
-        float *C, int ldc)
-{
-    //printf("cpu: %d %d %d %d %d %f %d %d %f %d\n",TA, TB, M, N, K, ALPHA, lda, ldb, BETA, ldc);
-    int i, j;
-    for(i = 0; i < M; ++i){
-        for(j = 0; j < N; ++j){
-            C[i*ldc + j] *= BETA;
+
+//6-loops with packA and PackB
+void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int M, int N, int K, float ALPHA,
+        size_t A, int lda,
+        size_t B, int ldb,
+        size_t C,  int ldc, int BlockM, int BlockN, int BlockK, size_t transposeB, size_t transposeA)
+    {        
+    int ii,jj,kk,i,j,k;
+    //int ld = __builtin_epi_vsetvlmax(__epi_e32, __epi_m1);//16;
+    const gpr_t ld = tmp.pick();
+    const gpr_t vlen = tmp.pick();
+    load_constant(vlen, cfg.vlen);
+    //vsetvli(ld, vlen, e32 | vlmul(1));
+    long gvl;
+    const vr_t tmp_reg = vout[0];
+    const gpr_t b_index = tmp.pick();
+    const gpr_t bT_index = tmp.pick();
+    const gpr_t a_index = tmp.pick();
+    const gpr_t aT_index = tmp.pick();
+
+    for (jj = 0; jj < N; jj+=BlockN) {
+        int Nc = ((jj+BlockN>N)?(N-jj):(BlockN));
+        for (kk = 0; kk < K; kk+=BlockK) {
+            int Kc = ((kk+BlockK > K)?(K-kk):(BlockK));
+            int itr=0;
+            for(int j=0;j<Nc;){
+                gvl = cfg.vlen;
+
+                for(int k=0;k<Kc;k++){
+
+                    //      transposeB[k*Kc+j] = B[(k+kk)*ldb+(j+jj)];
+                    //__epi_2xf32 tmp = __builtin_epi_vload_2xf32( &B[(k+kk)*ldb+(j+jj)], gvl);
+                    load_constant(b_index, B+(k+kk)*ldb+(j+jj)*sizeof(float));
+                    vle32(tmp_reg, b_index);
+                    //svst1(pg, &transposeB[((k+(Kc*itr))*ld)+0], tmp);
+                    //__builtin_epi_vstore_2xf32( &transposeB[((k+(Kc*(j/ld)))*ld)+0], tmp, gvl);
+                    load_constant(bT_index, (((k+(Kc*(j/ld)))*ld)+0)*sizeof(float));
+                    vse32(tmp_reg, bT_index);
+                    //transposeB[k*Nc+j] = B[(k+kk)*ldb+(j+jj)];
+                }
+                itr++;
+                j+=gvl;
+            }
+            for (ii = 0; ii < M; ii+=BlockM) {
+            int Mc = ((ii+BlockM >M)?(M-ii):(BlockM)) ;
+
+            int itr1=0;
+            for(int i=0;i<Mc;i++){
+                for(int k=0;k<Kc;k++){
+                    //      	__epi_2xf32 tmp = __builtin_epi_vload_2xf32(&A[(i+ii)*lda+(k+kk)], gvl);
+                    //    	__builtin_epi_vstore_strided_2xf32(&transposeA[k*Mc+i], tmp, Mc*4, gvl);
+                    //transposeA[k*Mc+i] = A[(i+ii)*lda+(k+kk)];
+                    load_constant(a_index, A+((i+ii)*lda+(k+kk))*sizeof(float));
+                    load_constant(aT_index, (k*Mc+i)*sizeof(float));
+                    vle32(tmp_reg, a_index);
+                    vse32(tmp_reg, aT_index);
+                    }
+                }
+                std::cout << "Calling gemm_nn_unroll" << std::endl;
+                gemm_nn_unroll16(vout, nvregs, tmp, ii,jj,kk,transposeA,transposeB, C,ALPHA, Mc,Nc, Kc, Mc,ld,ldc);
+            }
         }
     }
+}
+
+void jit_convolution_kernel_t::gemm_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,
+        int TA, int TB, int M, int N, int K, float ALPHA, 
+        size_t A, int lda, 
+        size_t B, int ldb,
+        float BETA,
+        size_t C, int ldc)
+{
+    std::cout << "Enter GEMM CPU" << std::endl;
     if(!TA && !TB)
     {
+	    /*** enable below for the 6-loops packed implementations */
+        int blockM = std::min(16, M);
+        int blockN = std::min(512, N);
+        int blockK = std::min(128, K);
+
+        // Using new to allocate memory
+        float* transposeB = new (std::nothrow) float[blockM * blockN * blockK];
+        float* transposeA = new (std::nothrow) float[blockM * blockN * blockK];
+
+        if (!transposeB) {
+            std::cerr << "Fatal: failed to allocate bytes for transposeB.\n";
+            exit(EXIT_FAILURE); // Prefer EXIT_FAILURE or EXIT_SUCCESS
+        }
+
+        if (!transposeA) {
+            std::cerr << "Fatal: failed to allocate bytes for transposeA.\n";
+            exit(EXIT_FAILURE);
+        }
+        size_t transposeB_ = reinterpret_cast<size_t>(transposeB);
+        size_t transposeA_ = reinterpret_cast<size_t>(transposeA);
+        //gemm_nn_original(M,N,K,ALPHA,A, lda,B, ldb, C, ldc);	
+        std::cout << "Calling gemm_nn_pack2" << std::endl;
+        gemm_nn_pack2(vout, nvregs, tmp, M, N, K, ALPHA,A, lda, B, ldb,C, ldc, blockM, blockN, blockK, transposeB_, transposeA_);
+        delete[] transposeB;
+        transposeB = nullptr; // Using nullptr
+
+        delete[] transposeA;
+        transposeA = nullptr; // Using nullptr
+
     /*** 3-loop implementation */
-	gemm_nn_unroll16(M, N, K, ALPHA,A,lda, B, ldb,C,ldc);
+	//gemm_nn_unroll16(vout, nvregs, tmp, M, N, K, ALPHA,A,lda, B, ldb,C,ldc);
     }/*
     else if(TA && !TB)
         gemm_tn(M, N, K, ALPHA,A,lda, B, ldb,C,ldc);
@@ -443,7 +529,8 @@ void jit_convolution_kernel_t::code(convolution_schedule_t::jit_conv_kernel_args
     const int stride_w = cfg.stride_w; // stride width
     const int l_pad = cfg.l_pad; // left padding
     const int t_pad = cfg.t_pad; // top padding
-
+    const int vlen = cfg.vlen; // vector length
+    std::cout << vlen << std::endl;
     const int nvregs = traits.erbw * traits.erbc;
     const size_t wei_sew = types::data_type_size(cfg.wei_dt);
     const size_t bia_sew = cfg.with_bias ? types::data_type_size(cfg.bias_dt) : 0;
@@ -455,7 +542,11 @@ void jit_convolution_kernel_t::code(convolution_schedule_t::jit_conv_kernel_args
     //const auto args_src_ptr = offsetof(jit_conv_kernel_args_t, src);
     size_t src_addr = reinterpret_cast<size_t>(kargs.src);
     size_t dst_addr = reinterpret_cast<size_t>(kargs.dst);
-    
+    size_t wei_addr = reinterpret_cast<size_t>(kargs.wei);
+    int M = oc; // Number of output channels
+    int N = oh * ow; // Output spatial dimensions (flattened)
+    int K = ic * kh * kw; // Dimension shared by A and B
+
     /// Output register block
     vr_t vout[32];
     for (int i = 0; i < nvregs; ++i)
@@ -463,7 +554,7 @@ void jit_convolution_kernel_t::code(convolution_schedule_t::jit_conv_kernel_args
     /// Pool of available caller-saved general purpose registers
     register_pool_t tmp_pool({t0,t1,t2,t3,t4,t5,t6,a7,a6,a5,a4,a3,a2,a1});
     im2col_cpu(vout, nvregs, tmp_pool, src_addr, dst_addr, ic, ih, iw, kh, stride_h, l_pad);
-    
+    gemm_cpu(vout, nvregs, tmp_pool, 0, 0, M, N, K, 1.0, wei_addr, K, dst_addr, N, 0.0, dst_addr, N);
 }
 
 /*
