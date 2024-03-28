@@ -75,9 +75,10 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
     // initialize channels register
     const gpr_t channel = tmp.pick();
     load_constant(channel, channels_col);
+    c = 0;
     if (channels_col > 1)   load_constant(channel, channels_col);
-    l("channels");
-
+    L("channels");
+    
     //for (c = 0; c < channels_col; ++c) {
     int w_offset = c % ksize;
     load_constant(w_reg, w_offset);
@@ -176,6 +177,7 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
 
     }
     if (channel > 1) {
+        c++;
         addi(channel, channel, -1);
         bnez(channel, "channels");
     }
