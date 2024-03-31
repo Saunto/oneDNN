@@ -25,7 +25,7 @@ using namespace dnnl::impl::utils;
 using namespace rvjit::vtype;
 
 void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, 
-    const void* data_im,const void* data_col,int channels,  int height,  int width,int ksize,  int stride, int pad)
+    int channels,  int height,  int width,int ksize,  int stride, int pad)
 {
     int h,w; 
     int height_col = (height + 2*pad - ksize) / stride + 1;
@@ -644,8 +644,6 @@ void jit_convolution_kernel_t::code(convolution_schedule_t::jit_conv_kernel_args
     int M = oc; // Number of output channels
     int N = oh * ow; // Output spatial dimensions (flattened)
     int K = ic * kh * kw; // Dimension shared by A and B
-    int size = kh * kw * ic * oh * ow;
-    float* intermediateMatrix = new float[size];
 
     /// Output register block
     vr_t vout[32];
@@ -653,7 +651,7 @@ void jit_convolution_kernel_t::code(convolution_schedule_t::jit_conv_kernel_args
         vout[i] = static_cast<vr_t>(i);
     /// Pool of available caller-saved general purpose registers
     register_pool_t tmp_pool({t0,t1,t2,t3,t4,t5,t6,a7,a6,a5,a4,a3,a2,a1,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11});
-    im2col_cpu(vout, nvregs, tmp_pool, kargs.src, intermediateMatrix, ic, ih, iw, kh, stride_h, l_pad);
+    im2col_cpu(vout, nvregs, tmp_pool, ic, ih, iw, kh, stride_h, l_pad);
     //gemm_cpu(vout, nvregs, tmp_pool, 0, 0, M, N, K, 1.0, kargs.src, K, kargs.wei, N, 0.0, kargs.dst, N);
     ret();
 }//*/
