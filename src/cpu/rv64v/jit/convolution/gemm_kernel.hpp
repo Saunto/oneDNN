@@ -53,7 +53,7 @@ public:
 
 private:
     const int imm_range = imm12_max() - imm_min();
-
+    /*
     template <typename T>
     void im2col_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, const T data_im,const T data_col,int channels,  int height,  int width,int ksize,  int stride, int pad);
     
@@ -61,7 +61,14 @@ private:
     void gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int M, int N, int K, float ALPHA, size_t A, int lda,
         size_t B, int ldb, size_t C,  int ldc, int BlockM, int BlockN, int BlockK, size_t transposeB, size_t transposeA);
     void gemm_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int TA, int TB, int M, int N, int K, float ALPHA, size_t A, int lda, size_t B, int ldb, float BETA, size_t C, int ldc);
+    */
+    void im2col_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, const void* data_im,const void* data_col,int channels,  int height,  int width,int ksize,  int stride, int pad);
     
+    void gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int ii, int jj, int kk, const void* A, const void* B, const void* C, float ALPHA, int M, int N, int K,  int lda,int ldb,int ldc);
+    void gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int M, int N, int K, float ALPHA, const void* A, int lda,
+        const void* B, int ldb, const void* C,  int ldc, int BlockM, int BlockN, int BlockK, float* transposeB, float* transposeA);
+    void gemm_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int TA, int TB, int M, int N, int K, float ALPHA, const void* A, int lda, const void* B, int ldb, float BETA, const void* C, int ldc);
+   
     void fwdd_inner_loops(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp);
 
 

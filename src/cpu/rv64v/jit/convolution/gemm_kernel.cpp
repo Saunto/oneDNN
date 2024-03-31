@@ -23,162 +23,218 @@ using jit_conv_kernel_args_t = convolution_schedule_t::jit_conv_kernel_args_t;
 // Implementing DARKNET vectorized functions using JIT instructions
 using namespace dnnl::impl::utils;
 using namespace rvjit::vtype;
-template <typename T>
+
 void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, 
-    const T data_im,const T data_col,int channels,  int height,  int width,int ksize,  int stride, int pad)
+    const void* data_im,const void* data_col,int channels,  int height,  int width,int ksize,  int stride, int pad)
 {
-    int c,h,w, index; 
+    int h,w; 
     int height_col = (height + 2*pad - ksize) / stride + 1;
     int width_col = (width + 2*pad - ksize) / stride + 1;
-    // register_pool_t tmp_pool({t0,t1,t2,t3,t4,t5,t6,a7,a6,a5,a4,a3,a2,a1});
-        
-    const gpr_t gvl = tmp.pick();
-    const gpr_t vlen = tmp.pick();
-    const gpr_t w_reg = tmp.pick();
-    const gpr_t h_offset_reg = tmp.pick();
-    const gpr_t intermediate_reg = tmp.pick();
+    //register_pool_t tmp_pool({t0,t1,t2,t3,t4,t5,t6,a7,a6,a5,a4,a3,a2,a1,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11});
+
+    const gpr_t vsrc = tmp.pick(); // Holds base address of src
+    const gpr_t vcol = tmp.pick(); // Holds base address of col
+    const gpr_t vwcol = tmp.pick(); // Holds base address of wcol
+    rvjit::assembler::ld(vsrc, a0, offsetof(jit_conv_kernel_args_t, src));
+    rvjit::assembler::ld(vcol, a0, offsetof(jit_conv_kernel_args_t, inter));
+    const int src_sew = types::data_type_size(cfg.src_dt);
+    const int col_sew = types::data_type_size(cfg.dst_dt);
+    const gpr_t sew = tmp.pick();
+    load_constant(sew, src_sew);
+    int* w_col = new int[width_col];
+    for(int i = 0; i < width_col; ++i) {
+        w_col[i] = i;
+    }
+    intptr_t baseAddress = reinterpret_cast<intptr_t>(w_col);
     const gpr_t tmp1 = tmp.pick();
-    const gpr_t four = tmp.pick();
-    const gpr_t tmp2 = tmp.pick();
-    const gpr_t val_reg = tmp.pick();
-    const gpr_t src = tmp.pick();
-    const gpr_t col = tmp.pick();
+
     const vr_t wcol = vout[0];
     const vr_t OFFSET = vout[1];
-    const vr_t WIDTHCOL = vout[2];
-    const vr_t PAD = vout[3];
-    const vr_t STRIDE = vout[4];
-    const vr_t INTER = vout[5];
-    const vr_t intermediate1 = vout[6];
-    const vr_t imcol = vout[7];
+    const vr_t PAD = vout[2];
+    const vr_t STRIDE = vout[3];
+    const vr_t intermediate1 = vout[4];
+    const vr_t IMCOL = vout[5];
+    const vr_t WIDTHCOL = vout[6];
+    const vr_t INTER = vout[7];
     const vr_t intermediate2 = vout[8];
     const vr_t colindex = vout[9];
     const vr_t WIDTH = vout[10];
     const vr_t HEIGHT = vout[11];
     const vr_t CIM = vout[12];
-    const vr_t imrow = vout[13];
+    const vr_t IMROW = vout[13];
     const vr_t FOUR = vout[14];
     const vr_t XERO = vout[15];
     const vr_t XERO1 = vout[16];
-    const vr_t intermediate5 = vout[17];
-    const vr_t VAL = vout[18];
-    const vr_t dataim = vout[19];
-    const vr_t datacol = vout[20];
+    const vr_t VAL = vout[17];
+    const vr_t dataim = vout[18];  
+    const vr_t datacol = vout[19];
+    const vr_t intermediate5 = vout[20];
 
-    load_constant(src, data_im);
-    load_constant(col, data_col);
+    const gpr_t vlen = tmp.pick();
     load_constant(vlen, cfg.vlen);
-
-    vtype_t sew = e32;
-    vsetvli(gvl, vlen, sew | vlmul(1));
+    
     const int channels_col = channels * ksize * ksize;
     // initialize channels register
-    c = 0;
     const gpr_t channel = tmp.pick();
-    if (channels_col > 1)   load_constant(channel, channels_col);
+    const gpr_t channel_end = tmp.pick();
+    load_constant(channel, 0);
+    load_constant(channel_end, channels_col);
     L("channels");
     //for (c = 0; c < channels_col; ++c) {
-    int w_offset = c % ksize;
-    load_constant(w_reg, w_offset);
-    int h_offset = (c / ksize) % ksize;
-    int c_im = c / ksize / ksize;
-    for (h = 0; h < height_col; ++h) {
-        int im_row = h_offset + h * stride;
-        int intermediate = (c * height_col + h);
-        load_constant(intermediate_reg, intermediate);
-        im_row -= pad;
-        int val = width*(im_row + height*c_im);
-        load_constant(val_reg, val);
-        for (w = 0; w < width_col; w += cfg.vlen) {   
-            //Index calculation
-            load_constant(tmp1, w);
-            vle32(wcol, tmp1); // load
-            vmv_sx(OFFSET, w_reg); // broadcast
-            load_constant(tmp1, pad);
-            vmv_sx(PAD, tmp1); //broadcast
-            load_constant(tmp1, stride);
-            vmv_sx(STRIDE, tmp1); //broadcast
 
-            vmul_vv(intermediate1, STRIDE, wcol); // multiplication
-            vadd_vv(imcol, intermediate1, OFFSET); // addition
+    const gpr_t ksize_reg = tmp.pick();
+    load_constant(ksize_reg, ksize);
+    const gpr_t w_offset = tmp.pick();
+    rem(w_offset, channel, ksize_reg);
+    //int w_offset = c % ksize;
+    
+    const gpr_t h_offset = tmp.pick();
+    div(h_offset, channel, ksize_reg);
+    rem(h_offset, h_offset, ksize_reg);
+    //int h_offset = (c / ksize) % ksize;
 
-            load_constant(tmp1, width_col);
-            vmv_sx(WIDTHCOL, tmp1); //broadcast
+    const gpr_t c_im = tmp.pick();
+    div(c_im, channel, ksize_reg);
+    div(c_im, c_im, ksize_reg);
+    //int c_im = c / ksize / ksize;
 
-            vmv_sx(INTER, intermediate_reg); //broadcast
-            
-            vmul_vv(intermediate2, INTER, WIDTHCOL); // multiplication
+        const gpr_t height_end = tmp.pick();
+        const gpr_t height_i = tmp.pick();
+        load_constant(height_i, 0);
+        load_constant(height_end, height_col);
+        L("heights");
+        //for (h = 0; h < height_col; ++h) {
 
-            vadd_vv(colindex, intermediate2, wcol); // addition
+        const gpr_t im_row = tmp.pick();
+        const gpr_t stride_reg = tmp.pick();
+        load_constant(stride_reg, stride);
+        mul(im_row, height_i, stride_reg);
+        add(im_row, im_row, h_offset);
+        //int im_row = h_offset + h * stride;
 
-            vsub_vv(imcol, imcol, PAD); // subtract
+        const gpr_t intermediate = tmp.pick();
+        mul(intermediate, c_im, height_end);
+        add(intermediate, intermediate, height_i);
+        //int intermediate = (c * height_col + h);
 
-            //broadcast for conditional statement
-            load_constant(tmp1, width);
-            vmv_sx(WIDTH, tmp1); //broadcast
+        const gpr_t pad_reg = tmp.pick();
+        load_constant(pad_reg, pad);
+        sub(im_row, im_row, pad_reg);
+        //im_row -= pad;
 
-            load_constant(tmp1, height);
-            vmv_sx(HEIGHT, tmp1); //broadcasts
+        const gpr_t val = tmp.pick();
+        mul(val, height_end, c_im);
+        add(val, val, im_row);
+        //int val = width*(im_row + height*c_im);
+        
+        
+            const gpr_t width_i = tmp.pick();
+            const gpr_t width_end = tmp.pick();
+            const gpr_t index = tmp.pick();       
+            load_constant(width_i, 0);
+            load_constant(index, baseAddress);
+            load_constant(width_end, width_col);
+            L("widths");
+            //for (w = 0; w < width_col; w += cfg.vlen){
 
-            load_constant(tmp1, c_im);
-            vmv_sx(CIM, tmp1); //broadcast
+                //Index calculation     
+                vl(wcol, index, src_sew); // load
+                addiw(index, index, src_sew*cfg.vlen); // increment
+                
+                vmv_sx(OFFSET, w_offset); // broadcast
+                vmv_sx(PAD, pad_reg); //broadcast
+                vmv_sx(STRIDE, stride_reg); //broadcast
 
-            load_constant(tmp1, im_row);
-            vmv_sx(imrow, tmp1); //broadcast
+                vmul_vv(intermediate1, STRIDE, wcol); // multiplication
+                vadd_vv(IMCOL, intermediate1, OFFSET); // addition
 
-            //Broadcast 4 for index calculation (index*4 for float 32bit)
-            //int l = 4;
-            load_constant(four, 4);
-            vmv_sx(FOUR, four); //broadcast
+                vmv_sx(WIDTHCOL, width_end); //broadcast
 
-            int z=0;
-            float z1=0.0;
-            
-            load_constant(tmp2, z); 
-            vfsub_vv(XERO1, XERO1, XERO1); // set XERO1 to 0.0
-            vmv_sx(XERO, tmp2); //broadcast
+                vmv_sx(INTER, intermediate); //broadcast
+                
+                vmul_vv(intermediate2, INTER, WIDTHCOL); // multiplication
 
-            //Calculate mask
-            vmask_t colmask, colmask1, colmask2;
-            vmask_t rowmask, rowmask1, rowmask2;
-            vmask_t mask, mask1, mask2, mask3, mask4;
+                vadd_vv(colindex, intermediate2, wcol); // addition
 
-            vmsgt_vx(colmask, imcol, XERO);
-            vmslt_vx(colmask1, imcol, WIDTH);
-            vmseq_vv(colmask2, imcol, XERO);
+                vsub_vv(IMCOL, IMCOL, PAD); // subtract
+                
+                //broadcast for conditional statement
+                load_constant(tmp1, width);
+                vmv_sx(WIDTH, tmp1); //broadcast
 
-            vmsgt_vx(rowmask, imrow, XERO);
-            vmslt_vx(rowmask1, imrow, HEIGHT);
-            vmseq_vv(rowmask2, imrow, XERO);
-            
-            vmand_mm(mask, rowmask1, colmask1);
-            vmor_mm(mask1, colmask, colmask2);
-            vmor_mm(mask2, rowmask, rowmask2);
-            vmand_mm(mask3, mask1, mask2);
-            vmand_mm(mask4, mask, mask3);
+                load_constant(tmp1, height);
+                vmv_sx(HEIGHT, tmp1); //broadcasts
 
-            //Calculate val+imcol for final index
-            vmv_vx(intermediate5, val_reg);
-            vadd_vv(VAL, imcol, intermediate5, mask4);
+                vmv_sx(CIM, c_im); //broadcast
 
-            //Index multiply with 4
-            vmul_vv(VAL, VAL, FOUR);
-            vmul_vv(colindex, colindex, FOUR);
+                vmv_sx(IMROW, im_row); //broadcast
 
-            //vload with indexed mask
-            vlox(dataim, src, VAL, mask4);
-            //store with index
-            vsox(datacol, col, colindex, mask4);
-            //w += cfg.vlen;//gvl;
-            
-            }
+                //Broadcast 4 for index calculation (index*4 for float 32bit)
+                //int l = 4;
+                vmv_sx(FOUR, sew); //broadcast
+                
+                int z=0;
+                float z1=0.0;
+                
+                load_constant(tmp1, z); 
+                vfsub_vv(XERO1, XERO1, XERO1); // set XERO1 to 0.0
+                vmv_sx(XERO, tmp1); //broadcast
+                            
+                const vr_t colmask = vout[21];
+                const vr_t colmask1 = vout[22];
+                const vr_t colmask2 = vout[23];
+                const vr_t rowmask = vout[24];
+                const vr_t rowmask1 = vout[25];
+                const vr_t rowmask2 = vout[26];
+                const vr_t mask = vout[27];
+                const vr_t mask1 = vout[28];
+                const vr_t mask2 = vout[29];
+                const vr_t mask3 = vout[30];
+                const vr_t mask4 = vout[31];
+                
+                vmsgt_vx(colmask, IMCOL, XERO);
+                vmslt_vx(colmask1, IMCOL, WIDTH);
+                vmseq_vv(colmask2, IMCOL, XERO);
+                
+                vmsgt_vx(rowmask, IMROW, XERO);
+                vmslt_vx(rowmask1, IMROW, HEIGHT);
+                vmseq_vv(rowmask2, IMROW, XERO);
+                
+                vmand_mm(mask, rowmask1, colmask1);
+                vmor_mm(mask1, colmask, colmask2);
+                vmor_mm(mask2, rowmask, rowmask2);
+                vmand_mm(mask3, mask1, mask2);
+                vmand_mm(mask4, mask, mask3);
+                
+                //Calculate val+imcol for final index
+                vmv_vx(intermediate5, val);
+                // Apply mask4 to IMCOL and intermediate5
+                vmul_vv(IMCOL, IMCOL, mask4);
+                vmul_vv(intermediate5, intermediate5, mask4);
+                vadd_vv(VAL, IMCOL, intermediate5);
+                //Index multiply with 4
+                vmul_vv(VAL, VAL, FOUR);
+                vmul_vv(colindex, colindex, FOUR);
 
-    }
-    if (channel > 1) {
-        c++;
-        addi(channel, channel, -1);
-        bnez(channel, "channels");
-    }
+                vl(dataim, vsrc, src_sew);
+                vmv_xs(tmp1, colindex);
+                addi(vcol, vcol, tmp1);
+                vs(dataim, vcol, src_sew);
+                //vlox(dataim, vsrc, VAL, vmask::unmasked);
+                //vsox(dataim, vcol, colindex, src_sew);
+                
+            // Width loop
+            addi(width_i, width_i, cfg.vlen);
+            blt(width_i, width_end, "widths");
+
+        // Height loop
+        addi(height_i, height_i, 1);
+        blt(height_i, height_end, "heights");
+    // Channel loop
+    addi(channel, channel, 1);
+    blt(channel, channel_end, "channels");
+    
+    ret();
 }
 
 
@@ -186,9 +242,10 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
 /* Manual vectorization with loop interchange + loop unrolling with unroll degree 24*/
 
 void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,
-    int ii, int jj, int kk, const size_t A, const size_t B, const size_t C, float ALPHA, int M, int N, 
+    int ii, int jj, int kk, const void* A, const void* B, const void* C, float ALPHA, int M, int N, 
     int K,  int lda,int ldb,int ldc)
 {
+    /*
     const gpr_t gvl = tmp.pick();
     const gpr_t vlen = tmp.pick();
 
@@ -378,7 +435,6 @@ void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, r
             load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float)));
             vle32(vc3, c_index);
         }
-        #pragma omp parallel for schedule(static)
         for (int k = 0; k < K; k ++) {
                 load_constant(a_index, A+(i+lda*k)*sizeof(float));
                 if (i+1 < M) {load_constant(a_index1, A+(i+1+lda*k)*sizeof(float));}
@@ -404,15 +460,16 @@ void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, r
             if (i+3 < M) {load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float))); vse32(vc3, c_index);}
         }
         j += cfg.vlen;
-  }
+    }   
+ */   
 }
 
 
 //6-loops with packA and PackB
 void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int M, int N, int K, float ALPHA,
-        size_t A, int lda,
-        size_t B, int ldb,
-        size_t C,  int ldc, int BlockM, int BlockN, int BlockK, size_t transposeB, size_t transposeA)
+        const void* A, int lda,
+        const void* B, int ldb,
+        const void* C,  int ldc, int BlockM, int BlockN, int BlockK, float* transposeB, float* transposeA)
     {        
     int ii,jj,kk,i,j,k;
     //int ld = __builtin_epi_vsetvlmax(__epi_e32, __epi_m1);//16;
@@ -421,6 +478,17 @@ void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, regi
     load_constant(vlen, cfg.vlen);
     //vsetvli(ld, vlen, e32 | vlmul(1));
     long gvl = cfg.vlen;;
+
+    // Registers to serve as pointers to the arguments
+    const gpr_t vsrc = tmp.pick(); // A 
+    const gpr_t vwei = tmp.pick(); // B 
+    const gpr_t vdst = tmp.pick(); // C
+
+    // Loading the addresses of the arguments
+    rvjit::assembler::ld(vsrc, a0, offsetof(jit_conv_kernel_args_t, src));
+    rvjit::assembler::ld(vwei, a0, offsetof(jit_conv_kernel_args_t, wei));
+    rvjit::assembler::ld(vdst, a0, offsetof(jit_conv_kernel_args_t, dst));
+
     const vr_t tmp_reg = vout[0];
     const gpr_t b_index = tmp.pick();
     const gpr_t bT_index = tmp.pick();
@@ -432,6 +500,7 @@ void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, regi
 
     const gpr_t k_loop = tmp.pick();
     const gpr_t K_reg = tmp.pick();
+    auto off = asm_const(tmp, cfg.vlen * sizeof(float));
     jj = 0;
     kk = 0;
     load_constant(N_reg, N);
@@ -442,7 +511,7 @@ void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, regi
     load_constant(K_reg, K);
     if (K > 1)   load_constant(k_loop, 0);
     L("kk");
-
+    
     //for (kk = 0; kk < K; kk+=BlockK) {
         int Kc = ((kk+BlockK > K)?(K-kk):(BlockK));
         int itr=0;
@@ -451,12 +520,13 @@ void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, regi
 
                 //      transposeB[k*Kc+j] = B[(k+kk)*ldb+(j+jj)];
                 //__epi_2xf32 tmp = __builtin_epi_vload_2xf32( &B[(k+kk)*ldb+(j+jj)], gvl);
-                load_constant(b_index, B+(k+kk)*ldb+(j+jj)*sizeof(float));
-                vle32(tmp_reg, b_index);
+                load_constant(b_index, ((k+kk)));//*ldb))+(j+jj)));
+                add(b_index, vwei, b_index);
+                vl(tmp_reg, b_index, sizeof(float));
                 //svst1(pg, &transposeB[((k+(Kc*itr))*ld)+0], tmp);
                 //__builtin_epi_vstore_2xf32( &transposeB[((k+(Kc*(j/ld)))*ld)+0], tmp, gvl);
-                load_constant(bT_index, (((k+(Kc*(j/ld)))*ld)+0)*sizeof(float));
-                vse32(tmp_reg, bT_index);
+                //load_constant(bT_index, (((k+(Kc*(j/ld)))*ld)+0)*sizeof(float));
+                //vse32(tmp_reg, bT_index);
                 //transposeB[k*Nc+j] = B[(k+kk)*ldb+(j+jj)];
             }
             itr++;
@@ -471,13 +541,13 @@ void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, regi
                 //      	__epi_2xf32 tmp = __builtin_epi_vload_2xf32(&A[(i+ii)*lda+(k+kk)], gvl);
                 //    	__builtin_epi_vstore_strided_2xf32(&transposeA[k*Mc+i], tmp, Mc*4, gvl);
                 //transposeA[k*Mc+i] = A[(i+ii)*lda+(k+kk)];
-                load_constant(a_index, A+((i+ii)*lda+(k+kk))*sizeof(float));
-                load_constant(aT_index, (k*Mc+i)*sizeof(float));
-                vle32(tmp_reg, a_index);
-                vse32(tmp_reg, aT_index);
+                ////load_constant(a_index, A+((i+ii)*lda+(k+kk))*sizeof(float));
+                ////load_constant(aT_index, (k*Mc+i)*sizeof(float));
+                ////vle32(tmp_reg, a_index);
+                ////vse32(tmp_reg, aT_index);
                 }
             }
-            gemm_nn_unroll16(vout, nvregs, tmp, ii,jj,kk,transposeA,transposeB, C,ALPHA, Mc,Nc, Kc, Mc,ld,ldc);
+            //gemm_nn_unroll16(vout, nvregs, tmp, ii,jj,kk,transposeA,transposeB, C,ALPHA, Mc,Nc, Kc, Mc,ld,ldc);
         }
     //}
     if (kk < K){
@@ -491,15 +561,19 @@ void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, regi
         addi(j_loop, j_loop, BlockN);
         blt(j_loop, N_reg, "jj");
     }
+    ret();
 }
 
 void jit_convolution_kernel_t::gemm_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,
         int TA, int TB, int M, int N, int K, float ALPHA, 
-        size_t A, int lda, 
-        size_t B, int ldb,
+        const void* A, int lda, 
+        const void* B, int ldb,
         float BETA,
-        size_t C, int ldc)
+        const void* C, int ldc)
 {
+    
+    // maybe change inputs to be like fwdd_innder_loops
+
     if(!TA && !TB)
     {
 	    /*** enable below for the 6-loops packed implementations */
@@ -520,10 +594,10 @@ void jit_convolution_kernel_t::gemm_cpu(rvjit::vr_t *vout, int nvregs, register_
             std::cerr << "Fatal: failed to allocate bytes for transposeA.\n";
             exit(EXIT_FAILURE);
         }
-        size_t transposeB_ = reinterpret_cast<size_t>(transposeB);
-        size_t transposeA_ = reinterpret_cast<size_t>(transposeA);
+        //size_t transposeB_ = reinterpret_cast<size_t>(transposeB);
+        //size_t transposeA_ = reinterpret_cast<size_t>(transposeA);
         //gemm_nn_original(M,N,K,ALPHA,A, lda,B, ldb, C, ldc);	
-        gemm_nn_pack2(vout, nvregs, tmp, M, N, K, ALPHA,A, lda, B, ldb,C, ldc, blockM, blockN, blockK, transposeB_, transposeA_);
+        gemm_nn_pack2(vout, nvregs, tmp, M, N, K, ALPHA,A, lda, B, ldb,C, ldc, blockM, blockN, blockK, transposeB, transposeA);
         delete[] transposeB;
         transposeB = nullptr; // Using nullptr
 
@@ -540,9 +614,8 @@ void jit_convolution_kernel_t::gemm_cpu(rvjit::vr_t *vout, int nvregs, register_
     else
         gemm_tt(M, N, K, ALPHA,A,lda, B, ldb,C,ldc);*/
 }
-
+///*
 void jit_convolution_kernel_t::code(convolution_schedule_t::jit_conv_kernel_args_t kargs){
-    
     const int oh = cfg.oh; // output height
     const int ow = cfg.ow; // output width
     const int ih = cfg.ih; // input height
@@ -561,35 +634,38 @@ void jit_convolution_kernel_t::code(convolution_schedule_t::jit_conv_kernel_args
     const size_t bia_sew = cfg.with_bias ? types::data_type_size(cfg.bias_dt) : 0;
     const size_t src_sew = types::data_type_size(cfg.src_dt);
     const size_t dst_sew = types::data_type_size(cfg.dst_dt);
-    
+
     // Offset to output pointer field in kernel args structure
     //const auto args_dst_ptr = offsetof(jit_conv_kernel_args_t, dst);
     //const auto args_src_ptr = offsetof(jit_conv_kernel_args_t, src);
-    size_t src_addr = reinterpret_cast<size_t>(kargs.src);
-    size_t dst_addr = reinterpret_cast<size_t>(kargs.dst);
-    size_t wei_addr = reinterpret_cast<size_t>(kargs.wei);
+    //size_t src_addr = reinterpret_cast<size_t>(kargs.src);
+    //size_t dst_addr = reinterpret_cast<size_t>(kargs.dst);
+    //size_t wei_addr = reinterpret_cast<size_t>(kargs.wei);
     int M = oc; // Number of output channels
     int N = oh * ow; // Output spatial dimensions (flattened)
     int K = ic * kh * kw; // Dimension shared by A and B
+    int size = kh * kw * ic * oh * ow;
+    float* intermediateMatrix = new float[size];
 
     /// Output register block
     vr_t vout[32];
     for (int i = 0; i < nvregs; ++i)
         vout[i] = static_cast<vr_t>(i);
     /// Pool of available caller-saved general purpose registers
-    register_pool_t tmp_pool({t0,t1,t2,t3,t4,t5,t6,a7,a6,a5,a4,a3,a2,a1});
-    im2col_cpu(vout, nvregs, tmp_pool, src_addr, dst_addr, ic, ih, iw, kh, stride_h, l_pad);
-    gemm_cpu(vout, nvregs, tmp_pool, 0, 0, M, N, K, 1.0, wei_addr, K, dst_addr, N, 0.0, dst_addr, N);
-}
-
+    register_pool_t tmp_pool({t0,t1,t2,t3,t4,t5,t6,a7,a6,a5,a4,a3,a2,a1,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11});
+    im2col_cpu(vout, nvregs, tmp_pool, kargs.src, intermediateMatrix, ic, ih, iw, kh, stride_h, l_pad);
+    //gemm_cpu(vout, nvregs, tmp_pool, 0, 0, M, N, K, 1.0, kargs.src, K, kargs.wei, N, 0.0, kargs.dst, N);
+    ret();
+}//*/
 /*
-void jit_convolution_kernel_t::code() {
-    
+void jit_convolution_kernel_t::code(convolution_schedule_t::jit_conv_kernel_args_t kargs) {
     const int nvregs = traits.erbw * traits.erbc;
     const size_t wei_sew = types::data_type_size(cfg.wei_dt);
     const size_t bia_sew = cfg.with_bias ? types::data_type_size(cfg.bias_dt) : 0;
     const size_t src_sew = types::data_type_size(cfg.src_dt);
     const size_t dst_sew = types::data_type_size(cfg.dst_dt);
+    const bool is_fwdd = utils::one_of(cfg.prop_kind,
+        prop_kind::forward_inference, prop_kind::forward_training);
 
     const size_t out_sew =
         utils::pick_by_prop_kind(cfg.prop_kind, dst_sew, src_sew, wei_sew);
@@ -622,10 +698,10 @@ void jit_convolution_kernel_t::code() {
         assembly_constant_t asm_c_off;
         assembly_constant_t asm_w_off;
 
-
         asm_w_off = asm_const(pool, w_off);
         // Subtract the accumulated W offset
         asm_c_off = asm_const(pool, c_off - (cfg.rbw-1) * w_off);
+         
 
         ld(out, a0, args_out_ptr);
         if (cfg.rbc > 1)
@@ -642,7 +718,7 @@ void jit_convolution_kernel_t::code() {
                 vl(vout[id], out, out_sew);
             else
                 vs(vout[id], out, out_sew);
-            //if (!is_bwdw) {
+            
             is_done = utils::nd_iterator_step(c, cfg.rbc, w, cfg.rbw);
             if (!is_done) {
                 if (w)
@@ -650,6 +726,7 @@ void jit_convolution_kernel_t::code() {
                 else
                     add_constant(out, out, asm_c_off);
             }
+            
         } while(!is_done);
     };
 
@@ -688,7 +765,7 @@ void jit_convolution_kernel_t::code() {
         
     // Store Partial Sums Segment
     // TODO: this is temporary BIAS support
-    if (cfg.with_bias) {//&& is_fwdd) {
+    if (cfg.with_bias && is_fwdd) {
         auto tmp   = tmp_pool.pick();
         auto bias_ptr  = tmp_pool.head();
         auto vbias = static_cast<vr_t>(nvregs);
@@ -704,10 +781,8 @@ void jit_convolution_kernel_t::code() {
     L("store_psum");
     move_outputs(false, tmp_pool);
     ret();
-
 }
 */
-
 
 int
 starting_point(jit_convolution_configuration_t cfg, int rbw, int kh, int kw) {
@@ -739,7 +814,7 @@ void jit_convolution_kernel_t::fwdd_inner_loops(rvjit::vr_t *vout, int rb_sz, re
     auto const kxcb_loop_sz = nstl::max(1, cfg.k_c/xcb);
     auto const xcb_loop_sz  = (cfg.k_c > xcb ? xcb : cfg.k_c) / wxcb;
     const int wei_sew = types::data_type_size(cfg.wei_dt);
-    const int src_sew = types::data_type_size(cfg.src_dt); 
+    const int src_sew = types::data_type_size(cfg.src_dt);
 
     // ---------------------------- Tensor Offsets ----------------------------
     const int kw_off   = cfg.w_icb * cfg.w_ocb * wei_sew;
@@ -886,8 +961,6 @@ void jit_convolution_kernel_t::fwdd_inner_loops(rvjit::vr_t *vout, int rb_sz, re
         bnez(i_kxc, "kxc_loop");
     }
 }
-
-
 } // namespace gemm
 } // namespace dnnl
 } // namespace impl
