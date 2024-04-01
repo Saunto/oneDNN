@@ -645,7 +645,7 @@ void free_schedule(convolution_schedule_t &s) {
 }
 
 void call_schedule(const convolution_schedule_t &s, int i, int mb,
-const float *dst, const float *src, const float *wei, const float *bias, const float *inter) {
+const float *dst, const float *src, const float *wei, const float *bias, const float *inter, const float *inter2) {
     std::cout << "call_schedule" << std::endl;
     convolution_schedule_t::jit_conv_kernel_args_t kargs;
     convolution_schedule_t::precalculated_args &args = s.args[i];
@@ -654,6 +654,7 @@ const float *dst, const float *src, const float *wei, const float *bias, const f
     kargs.wei = wei + args.wei;
     kargs.bias = bias + args.bias;
     kargs.inter = inter;
+    kargs.inter2 = inter2;
     kargs.vlen = args.vlen;
     kargs.h_loop_size = args.h_loop_size;
     kargs.w_loop_size = args.w_loop_size;

@@ -63,10 +63,12 @@ private:
     void gemm_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int TA, int TB, int M, int N, int K, float ALPHA, size_t A, int lda, size_t B, int ldb, float BETA, size_t C, int ldc);
     */
     void im2col_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int channels,  int height,  int width,int ksize,  int stride, int pad);
-    
-    void gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int ii, int jj, int kk, float ALPHA, int M, int N, int K, int lda,int ldb,int ldc);
-    void gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int M, int N, int K, float ALPHA, int lda, 
-        int ldb, int ldc, int BlockM, int BlockN, int BlockK, float* transposeB, float* transposeA);
+    void col2im_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int channels, int height, int width, int ksize, int stride, int pad);
+    //void gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int ii, int jj, int kk, float ALPHA, int M, int N, int K, int lda,int ldb,int ldc);
+    //void gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int M, int N, int K, float ALPHA, int lda, 
+    //    int ldb, int ldc, int BlockM, int BlockN, int BlockK, float* transposeB, float* transposeA);
+    void gemm_nn_noalpha_unroll163loops(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int M, int N, int K, float ALPHA, int lda, int ldb, int ldc);
+
     void gemm_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int TA, int TB, int M, int N, int K, float ALPHA, int lda, int ldb, float BETA, int ldc);
 
     template <typename data_t> dnnl_status_t gemm(const char *transa_, const char *transb_,

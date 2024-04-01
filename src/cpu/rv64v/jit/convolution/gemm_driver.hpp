@@ -65,6 +65,7 @@ struct convolution_schedule_t {
         const void *wei;
         const void *bias;
         const void *inter;
+        const void *inter2;
         size_t vlen;
         size_t h_loop_size;
         size_t w_loop_size;
@@ -109,7 +110,7 @@ void init_schedule(convolution_schedule_t &s,
                     const jit_convolution_configuration_t &acfg);
 void free_schedule(convolution_schedule_t &s);
 void call_schedule(const convolution_schedule_t &s, int i, int mb,
-                    const float *dst, const float *src, const float *wei, const float *bias, const float *inter);
+                    const float *dst, const float *src, const float *wei, const float *bias, const float *inter, const float *inter2);
 
 } // namespace gemm
 } // namespace rv64

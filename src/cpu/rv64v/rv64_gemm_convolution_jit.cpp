@@ -1,7 +1,7 @@
 #include "cpu/rv64v/rv64_gemm_convolution_jit.hpp"
 #include "common/utils.hpp"
 #include "cpu/gemm_convolution_utils.hpp"
-    
+
 #include <cstdlib>
 #include <iostream>
 #include <vector>
@@ -23,13 +23,20 @@ rv64_gemm_convolution_jit_fwd_t<T>::do_execute(const exec_ctx_t &ctx) const {
     auto const src_mb_size = pd()->IC() * pd()->IH() * pd()->IW();
     auto const dst_mb_size = pd()->OC() * pd()->OH() * pd()->OW();
     
-    #pragma omp parallel for schedule(static)
-    for (int n = 0; n < pd()->MB(); ++n) {
-        auto const pdst = &dst[n*dst_mb_size];
-        auto const psrc = &src[n*src_mb_size];
-        for(size_t i = 0; i < schedule.N; ++i)
-            call_schedule(schedule, i, n, pdst, psrc, wei, bias);
-    }
+    int size = pd()->KH() * pd()->KW() * pd()->IC() * pd()->OH() * pd()->OW();
+
+    // Allocate memory for the intermediate data
+    // Using float col[size]; does not work due to stack size limitations
+    // Using float* col = new float[size]; does work since it uses the heap  
+    
+    float* inter = new float[size](); 
+    float* inter2 = new float[size]();
+    
+    call_schedule(schedule, 0, 0, dst, src, wei, bias, inter, inter2);
+
+    delete[] inter;
+    delete[] inter2;
+
     return status::success;
 }
 
