@@ -660,7 +660,6 @@ const float *dst, const float *src, const float *wei, const float *bias, const f
     kargs.w_loop_size = args.w_loop_size;
     kargs.load_partials = args.load_partials
         || (s.cfg.prop_kind == prop_kind::backward_weights ? mb > 0 : false);
-    //std::cout << "before s.calls[0]" << std::endl;
     s.calls[i](kargs);
 }
 
