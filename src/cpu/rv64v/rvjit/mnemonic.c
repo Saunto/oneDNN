@@ -1571,7 +1571,9 @@ rvj_instr rvj_vmsgt_vx(REGV vd, REGV vs1, REGV vs2) {
     return opIVX(vd, vs1, vs2, 0x1f, rvj_unmasked);
 }
 // Vector Permutation Instructions (TODO)
-
+rvj_instr rvj_vslideup_vx(REGV vd, REGV vs2, REGX rs1) {
+    return opIVX(vd, vs2, rs1, 0x0e, rvj_unmasked);
+}
 // Vector Integer Scalar Move Instructions
 rvj_instr rvj_vmv_xs(REGX vd, REGV vs2) {
     return opMVV(vd, 0, vs2, 0x10, rvj_unmasked);

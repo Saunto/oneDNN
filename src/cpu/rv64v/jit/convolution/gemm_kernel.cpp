@@ -15,7 +15,6 @@ namespace impl {
 namespace cpu {
 namespace rv64 {
 namespace gemm{
-
 using namespace rvjit;
 using jit_conv_kernel_args_t = convolution_schedule_t::jit_conv_kernel_args_t;
 
@@ -23,14 +22,15 @@ using jit_conv_kernel_args_t = convolution_schedule_t::jit_conv_kernel_args_t;
 // Implementing DARKNET vectorized functions using JIT instructions
 using namespace dnnl::impl::utils;
 using namespace rvjit::vtype;
-
+static int label_counter = 0;
+/*
 void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, 
     int channels,  int height,  int width,int ksize,  int stride, int pad)
 {
     int height_col = (height + 2*pad - ksize) / stride + 1;
     int width_col = (width + 2*pad - ksize) / stride + 1;
     //register_pool_t tmp_pool({t0,t1,t2,t3,t4,t5,t6,a7,a6,a5,a4,a3,a2,a1,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11});
-
+    tmp.reset();
     const gpr_t vsrc = tmp.pick(); // Holds base address of src
     const gpr_t vcol = tmp.pick(); // Holds base address of col
     const gpr_t vwcol = tmp.pick(); // Holds base address of wcol
@@ -131,15 +131,16 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
             const gpr_t width_end = tmp.pick();
             const gpr_t index = tmp.pick();       
             load_constant(width_i, 0);
-            load_constant(index, baseAddress);
             load_constant(width_end, width_col);
             L("widths");
             //for (w = 0; w < width_col; w += cfg.vlen){
+            //vsetvli(x0, vlen, vsew(sew) | vlmul(1));
 
+                load_constant(index, baseAddress);
                 //Index calculation     
+                add(index, index, width_i);
                 vl(wcol, index, src_sew); // load
-                addiw(index, index, src_sew*cfg.vlen); // increment
-                
+                                
                 vmv_sx(OFFSET, w_offset); // broadcast
                 vmv_sx(PAD, pad_reg); //broadcast
                 vmv_sx(STRIDE, stride_reg); //broadcast
@@ -208,8 +209,10 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
                 //Calculate val+imcol for final index
                 vmv_vx(intermediate5, val);
                 // Apply mask4 to IMCOL and intermediate5
-                vmul_vv(IMCOL, IMCOL, mask4);
-                vmul_vv(intermediate5, intermediate5, mask4);
+                //vmul_vv(IMCOL, IMCOL, mask4);
+                //vmul_vv(intermediate5, intermediate5, mask4);
+                vmand_mm(IMCOL, IMCOL, mask4);
+                vmand_mm(intermediate5, intermediate5, mask4);
                 vadd_vv(VAL, IMCOL, intermediate5);
                 //Index multiply with 4
                 vmul_vv(VAL, VAL, FOUR);
@@ -219,11 +222,13 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
                 vmv_xs(tmp1, colindex);
                 addi(vcol, vcol, tmp1);
                 vs(dataim, vcol, src_sew);
-                //vlox(dataim, vsrc, VAL, vmask::unmasked);
+                //vlox(dataim, vsrc, VAL, src_sew);
                 //vsox(dataim, vcol, colindex, src_sew);
                 
             // Width loop
-            addi(width_i, width_i, cfg.vlen);
+            load_constant(tmp1, width_col);
+            sub(tmp1, tmp1, width_i);
+            addi(width_i, width_i, tmp1);
             blt(width_i, width_end, "widths");
 
         // Height loop
@@ -233,422 +238,144 @@ void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, registe
     addi(channel, channel, 1);
     blt(channel, channel_end, "channels");
 
-}
-
-
-/***********************3. loop interchange with manual vectorization with ALPHA!=1 double buffer ****************/
-/* Manual vectorization with loop interchange + loop unrolling with unroll degree 24*/
-/*
-void jit_convolution_kernel_t::gemm_nn_unroll16(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int ii, int jj, int kk, float ALPHA, int M, int N, int K,  int lda,int ldb,int ldc){
-    
-    const gpr_t gvl = tmp.pick();
-    const gpr_t vlen = tmp.pick();
-
-    const gpr_t a_index = tmp.pick();
-    const gpr_t b_index = tmp.pick();
-    const gpr_t c_index = tmp.pick();
-    const gpr_t a_index1 = tmp.pick();
-    const gpr_t a_index2 = tmp.pick();
-    const gpr_t a_index3 = tmp.pick();
-
-    const vr_t vc = vout[0], vc1 = vout[1], vc2 = vout[2], vc3 = vout[3];
-    const vr_t vc4 = vout[4], vc5 = vout[5], vc6 = vout[6], vc7 = vout[7];
-    const vr_t vc8 = vout[8], vc9 = vout[9], vc10 = vout[10], vc11 = vout[11];
-    const vr_t vc12 = vout[12], vc13 = vout[13], vc14 = vout[14], vc15 = vout[15];
-    const vr_t vaalpha = vout[16], vaalpha1 = vout[17], vaalpha2 = vout[18];
-    const vr_t vaalpha3 = vout[19], vaalpha4 = vout[20], vaalpha5 = vout[21];
-    const vr_t vaalpha6 = vout[22], vaalpha7 = vout[23], vaalpha8 = vout[24];
-    const vr_t vaalpha9 = vout[25], vaalpha10 = vout[26], vaalpha11 = vout[27];
-    const vr_t vaalpha12 = vout[28], vaalpha13 = vout[29], vaalpha14 = vout[30];
-    const vr_t vaalpha15 = vout[31];
-    vr_t vb;
-
-    vtype_t sew = e32;
-    vsetvli(gvl, vlen, sew | vlmul(1)); 
-    int i1=ii, j1=jj, k1=kk;
-    int i=0,j=0,k=0;
-    
-    for ( j = 0; j < N; j += cfg.vlen) {
-    for (i = 0; i < M-15; i += 16) {
-
-        load_constant(c_index, C+((i+i1)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc, c_index);
-
-        load_constant(c_index, C+((i+i1+1)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc1, c_index);
-
-        load_constant(c_index, C+((i+i1+2)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc2, c_index);
-
-        load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc3, c_index);
-
-        load_constant(c_index, C+((i+i1+4)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc4, c_index);
-
-        load_constant(c_index, C+((i+i1+5)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc5, c_index);
-
-        load_constant(c_index, C+((i+i1+6)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc6, c_index);
-
-        load_constant(c_index, C+((i+i1+7)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc7, c_index);
-
-        load_constant(c_index, C+((i+i1+8)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc8, c_index);
-
-        load_constant(c_index, C+((i+i1+9)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc9, c_index);
-
-        load_constant(c_index, C+((i+i1+10)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc10, c_index);
-
-        load_constant(c_index, C+((i+i1+11)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc11, c_index);
-
-        load_constant(c_index, C+((i+i1+12)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc12, c_index);
-
-        load_constant(c_index, C+((i+i1+13)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc13, c_index);
-
-        load_constant(c_index, C+((i+i1+14)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc14, c_index);
-
-        load_constant(c_index, C+((i+i1+15)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc15, c_index);
-        for ( k = 0; k < K; k ++) {
-            vb = vout[31]; // Using last register for B
-
-            load_constant(b_index, B+(((k+(K*(j/ldb)))*ldb)+0)*sizeof(float));
-            vle32(vb, b_index);
-            load_constant(a_index, A+(i+lda*k)*sizeof(float));
-            vle32(vaalpha, a_index);
-            vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+1)+lda*k)*sizeof(float));
-            vle32(vaalpha1, a_index);
-            vfmacc_vv(vc1, vaalpha1, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+2)+lda*k)*sizeof(float));
-            vle32(vaalpha2, a_index);
-            vfmacc_vv(vc2, vaalpha2, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+3)+lda*k)*sizeof(float));
-            vle32(vaalpha3, a_index);
-            vfmacc_vv(vc3, vaalpha3, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+4)+lda*k)*sizeof(float));
-            vle32(vaalpha4, a_index);
-            vfmacc_vv(vc4, vaalpha4, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+5)+lda*k)*sizeof(float));
-            vle32(vaalpha5, a_index);
-            vfmacc_vv(vc5, vaalpha5, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+6)+lda*k)*sizeof(float));
-            vle32(vaalpha6, a_index);
-            vfmacc_vv(vc6, vaalpha6, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+7)+lda*k)*sizeof(float));
-            vle32(vaalpha7, a_index);
-            vfmacc_vv(vc7, vaalpha7, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+8)+lda*k)*sizeof(float));
-            vle32(vaalpha8, a_index);
-            vfmacc_vv(vc8, vaalpha8, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+9)+lda*k)*sizeof(float));
-            vle32(vaalpha9, a_index);
-            vfmacc_vv(vc9, vaalpha9, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+10)+lda*k)*sizeof(float));
-            vle32(vaalpha10, a_index);
-            vfmacc_vv(vc10, vaalpha10, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+11)+lda*k)*sizeof(float));
-            vle32(vaalpha11, a_index);
-            vfmacc_vv(vc11, vaalpha11, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+12)+lda*k)*sizeof(float));
-            vle32(vaalpha12, a_index);
-            vfmacc_vv(vc12, vaalpha12, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+13)+lda*k)*sizeof(float));
-            vle32(vaalpha13, a_index);
-            vfmacc_vv(vc13, vaalpha13, vb); // sum += ALPHA*A*B
-            load_constant(a_index, A+((i+14)+lda*k)*sizeof(float));
-            vle32(vaalpha14, a_index);
-            vfmacc_vv(vc14, vaalpha14, vb); // sum += ALPHA*A*B
-            vb = vout[16]; // Switch to 16th register for B due to register amount
-            load_constant(b_index, B+(((k+(K*(j/ldb)))*ldb)+0)*sizeof(float));
-            vle32(vb, b_index);
-            load_constant(a_index, A+((i+15)+lda*k)*sizeof(float));
-            vle32(vaalpha15, a_index);
-            vfmacc_vv(vc15, vaalpha15, vb); // sum += ALPHA*A*B  
-            
-        } 
-        load_constant(c_index, C+((i+i1)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc, c_index);
-        load_constant(c_index, C+((i+i1+1)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc1, c_index);
-        load_constant(c_index, C+((i+i1+2)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc2, c_index);
-        load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc3, c_index);
-        load_constant(c_index, C+((i+i1+4)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc4, c_index);
-        load_constant(c_index, C+((i+i1+5)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc5, c_index);
-        load_constant(c_index, C+((i+i1+6)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc6, c_index);
-        load_constant(c_index, C+((i+i1+7)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc7, c_index);
-        load_constant(c_index, C+((i+i1+8)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc8, c_index);
-        load_constant(c_index, C+((i+i1+9)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc9, c_index);
-        load_constant(c_index, C+((i+i1+10)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc10, c_index);
-        load_constant(c_index, C+((i+i1+11)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc11, c_index);
-        load_constant(c_index, C+((i+i1+12)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc12, c_index);
-        load_constant(c_index, C+((i+i1+13)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc13, c_index);
-        load_constant(c_index, C+((i+i1+14)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc14, c_index);
-        load_constant(c_index, C+((i+i1+15)*ldc+(j+j1)*sizeof(float)));
-        vse32(vc15, c_index);
-    }
-    
-    }
-
-    int i_left=i;
-    //itr=0;
-    for (int j = 0; j < N; ) {
-        for (i=i_left; i < M; i += 4) {    // change according to unroll degree
-        load_constant(c_index, C+((i+i1)*ldc+(j+j1)*sizeof(float)));
-        vle32(vc, c_index);
-        if(i + 1 < M) {
-            load_constant(c_index, C+((i+i1+1)*ldc+(j+j1)*sizeof(float)));
-            vle32(vc1, c_index);
-        }
-        if(i + 2 < M) {
-            load_constant(c_index, C+((i+i1+2)*ldc+(j+j1)*sizeof(float)));
-            vle32(vc2, c_index);
-        }
-        if(i + 3 < M) {
-            load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float)));
-            vle32(vc3, c_index);
-        }
-        for (int k = 0; k < K; k ++) {
-                load_constant(a_index, A+(i+lda*k)*sizeof(float));
-                if (i+1 < M) {load_constant(a_index1, A+(i+1+lda*k)*sizeof(float));}
-                if (i+2 < M) {load_constant(a_index2, A+(i+2+lda*k)*sizeof(float));}
-                if (i+3 < M) {load_constant(a_index3, A+(i+3+lda*k)*sizeof(float));}
-
-                vle32(vaalpha, a_index);
-                if (i+1 < M) {vle32(vaalpha1, a_index1);}
-                if (i+2 < M) {vle32(vaalpha2, a_index2);} // ALPHA*A
-                if (i+3 < M) {vle32(vaalpha3, a_index3);} // ALPHA*A
-
-                load_constant(b_index, B+(((k+(K*(j/ldb)))*ldb)+0)*sizeof(float));
-                vle32(vb, b_index);
-                vfmacc_vv(vc, vaalpha, vb);
-                if (i+1 < M) {vfmacc_vv(vc1, vaalpha1, vb);} // sum += ALPHA*A*B
-                if (i+2 < M) {vfmacc_vv(vc2, vaalpha2, vb);} // sum += ALPHA*A*B
-                if (i+3 < M) {vfmacc_vv(vc3, vaalpha3, vb);}// sum += ALPHA*A*B
-            }
-            load_constant(c_index, C+((i+i1)*ldc+(j+j1)*sizeof(float)));
-            vse32(vc, c_index);
-            if (i+1 < M) {load_constant(c_index, C+((i+i1+1)*ldc+(j+j1)*sizeof(float))); vse32(vc1, c_index);}
-            if (i+2 < M) {load_constant(c_index, C+((i+i1+2)*ldc+(j+j1)*sizeof(float))); vse32(vc2, c_index);}
-            if (i+3 < M) {load_constant(c_index, C+((i+i1+3)*ldc+(j+j1)*sizeof(float))); vse32(vc3, c_index);}
-        }
-        j += cfg.vlen;
-    }   
-  
-}
-*/
-
-//6-loops with packA and PackB
-/*
-void jit_convolution_kernel_t::gemm_nn_pack2(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int M, int N, int K, float ALPHA,
-        int lda, int ldb, int ldc, int BlockM, int BlockN, int BlockK, float* transposeB, float* transposeA)
-    {        
-    //int ii,jj,kk,i,j,k;
-    const gpr_t vlen = tmp.pick();
-    load_constant(vlen, cfg.vlen);
-    // Registers to serve as pointers to the arguments
-    const gpr_t vsrc = tmp.pick(); // A address
-    const gpr_t vwei = tmp.pick(); // B address
-    const gpr_t vdst = tmp.pick(); // C address
-
-    // Loading the addresses of the arguments
-    rvjit::assembler::ld(vsrc, a0, offsetof(jit_conv_kernel_args_t, inter));
-    rvjit::assembler::ld(vwei, a0, offsetof(jit_conv_kernel_args_t, wei));
-    rvjit::assembler::ld(vdst, a0, offsetof(jit_conv_kernel_args_t, dst));
-    
-    auto off = asm_const(tmp, cfg.vlen * sizeof(float));
-
-    const gpr_t jj = tmp.pick();
-    const gpr_t N_reg = tmp.pick();
-    load_constant(jj, 0);
-    load_constant(N_reg, N);
-    L("jj");
-    //for (jj = 0; jj < N; jj+=BlockN) {
-
-        const gpr_t Nc = tmp.pick();
-        const gpr_t BlockN_reg = tmp.pick();
-        const gpr_t tmp1 = tmp.pick();
-        load_constant(BlockN_reg, BlockN);
-        add(BlockN_reg, jj, BlockN_reg);
-
-        load_constant(tmp1, BlockN);        
-        blt(BlockN_reg, N_reg, "Nc");
-        beq(BlockN_reg, N_reg, "Nc");
-        
-        sub(tmp1, N_reg, jj);
-
-        L("Nc");
-        load_constant(Nc, tmp1);
-        // ((jj+BlockN>N)?(N-jj):(BlockN)));
-        // ((jj+BlockN<=N)?(BlockN):(N-jj)
-        
-        const gpr_t kk = tmp.pick();
-        const gpr_t K_reg = tmp.pick();
-        load_constant(kk, 0);
-        load_constant(K_reg, K);
-        L("kk");
-        //for (kk = 0; kk < K; kk+=BlockK) {
-
-            const gpr_t Kc = tmp.pick();
-            const gpr_t BlockK_reg = tmp.pick();
-            load_constant(BlockK_reg, BlockK);
-            add(BlockK_reg, kk, BlockK_reg);
-
-            load_constant(tmp1, BlockN);        
-            blt(BlockK_reg, K_reg, "Kc");
-            beq(BlockK_reg, K_reg, "Kc");
-            
-            sub(tmp1, K_reg, kk);
-
-            L("Kc");
-            load_constant(Kc, tmp1);
-            // ((kk+BlockK>K)?(K-kk):(BlockK)))
-            // ((kk+BlockK<=N)?(BlockN):(N-jj)
-
-            const gpr_t itr = tmp.pick();
-            load_constant(itr, 0);
-        
-            const gpr_t j = tmp.pick();
-            load_constant(j, 0);
-            L("j");
-            //for(int j=0;j<Nc; j+=gvl;){
-            
-                const gpr_t k = tmp.pick();
-                load_constant(k, 0);
-                L("k");
-                //for(int k=0;k<Kc;k++){
-                    intptr_t transposeBAddress = reinterpret_cast<intptr_t>(transposeB);
-
-                    const gpr_t transposeB_index = tmp.pick();
-                    const gpr_t B_index = tmp.pick();
-                    div(transposeB_index, j, vlen);
-                    mul(transposeB_index, transposeB_index, Kc);
-                    add(transposeB_index, transposeB_index, k);
-                    mul(transposeB_index, transposeB_index, vlen);
-                    add(transposeB_index, transposeB_index, vwei);
-                    // transposeB[((k+(Kc*(j/cfg.vlen)))*cfg.vlen)+0]
-
-                    const gpr_t ld_temp = tmp.pick();
-                    add(B_index, kk, k);
-                    load_constant(ld_temp, ldb);
-                    mul(B_index, B_index, ld_temp);
-                    add(B_index, B_index, j);
-                    add(B_index, B_index, jj);
-                    add(B_index, B_index, vwei);
-                    // B[(k+kk)*ldb+(j+jj)]
-
-                    const vr_t tmp_reg = vout[0];
-                    const int src_sew = types::data_type_size(cfg.src_dt);
-
-                    vl(tmp_reg, B_index, src_sew);
-                    vs(tmp_reg, transposeB_index, src_sew); 
-                             
-                addi(k, k, 1);
-                blt(k, Kc, "k");
-
-                addi(itr, itr, 1);
-        
-            addi(j, j, cfg.vlen);
-            blt(j, Nc, "j");
-       
-        const gpr_t ii = tmp.pick();
-        const gpr_t M_reg = tmp.pick();
-        load_constant(ii, 0);
-        load_constant(M_reg, M);
-        L("ii");
-        //for (ii = 0; ii < M; ii+=BlockM) {
-
-            const gpr_t Mc = tmp.pick();
-            const gpr_t BlockM_reg = tmp.pick();
-            load_constant(BlockM_reg, BlockM);
-            add(BlockM_reg, ii, BlockM_reg);
-
-            load_constant(tmp1, BlockM);        
-            blt(BlockM_reg, M_reg, "Mc");
-            beq(BlockM_reg, M_reg, "Mc");
-            
-            sub(tmp1, M_reg, ii);
-
-            L("Mc");
-            load_constant(Mc, tmp1);
-            // ((ii+BlockM>M)?(M-ii):(BlockM)))
-            // ((ii+BlockM<=M)?(BlockM):(M-ii)
-            const gpr_t itr1 = tmp.pick();
-            load_constant(itr1, 0);
-        
-            const gpr_t i = tmp.pick();
-            load_constant(i, 0);
-            L("i");
-            //for(int i=0;i<Mc;i++){
-                load_constant(k, 0);
-                L("k1");
-                //for(int k=0;k<Kc;k++){
-                    //transposeA[k*Mc+i] = A[(i+ii)*lda+(k+kk)];
-                    intptr_t transposeAAddress = reinterpret_cast<intptr_t>(transposeA);
-                    const gpr_t transposeA_index = tmp.pick();
-                    mul(transposeA_index, k, Mc);
-                    add(transposeA_index, transposeA_index, i);
-                    // transposeA[k*Mc+i]
-
-                    const gpr_t A_index = tmp.pick();
-                    load_constant(ld_temp, lda);
-                    add(A_index, ii, i);
-                    mul(A_index, A_index, ld_temp);
-                    add(A_index, A_index, kk);
-                    add(A_index, A_index, k);
-                    // A[(i+ii)*lda+(k+kk)]
-
-                    vl(tmp_reg, A_index, src_sew);
-                    vs(tmp_reg, transposeA_index, src_sew); 
-                
-                addi(k, k, 1);
-                blt(k, Kc, "k1");
-                //gemm_nn_unroll16(vout, nvregs, tmp, ii,jj,kk,transposeA,transposeB, C,ALPHA, Mc,Nc, Kc, Mc,ld,ldc);
-            
-            addi(i, i, 1);
-            blt(i, Mc, "i");
-
-        addi(ii, ii, BlockM);
-        blt(ii, M_reg, "ii");
-
-        // KK loop
-        addi(kk, kk, BlockK);
-        blt(kk, K_reg, "kk");
-
-    // JJ loop
-    addi(jj, jj, BlockN);
-    blt(jj, N_reg, "jj");
-    
-    ret();
 }*/
+void jit_convolution_kernel_t::im2col_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, 
+    int channels,  int height,  int width,int ksize,  int stride, int pad)
+{
+    int height_col = (height + 2*pad - ksize) / stride + 1;
+    int width_col = (width + 2*pad - ksize) / stride + 1;
+    int channels_col = channels*ksize*ksize;
+    for (int i = 0; i < nvregs; ++i)
+        vout[i] = static_cast<vr_t>(i);
+
+    //register_pool_t tmp_pool({t0,t1,t2,t3,t4,t5,t6,a7,a6,a5,a4,a3,a2,a1,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11});
+    tmp.reset();
+    const gpr_t vsrc = tmp.pick(); // Holds base address of src
+    const gpr_t vcol = tmp.pick(); // Holds base address of col
+    rvjit::assembler::ld(vsrc, a0, offsetof(jit_conv_kernel_args_t, src));
+    rvjit::assembler::ld(vcol, a0, offsetof(jit_conv_kernel_args_t, inter));
+    const int src_sew = types::data_type_size(cfg.src_dt);
+    const int col_sew = types::data_type_size(cfg.dst_dt);
+    const gpr_t sew = tmp.pick();
+    load_constant(sew, src_sew);
+    
+
+    const gpr_t channel = tmp.pick();
+    const gpr_t c_end = tmp.pick();
+    load_constant(channel, 0);
+    load_constant(c_end, channels);
+    L("channels");
+
+        const gpr_t ksize_reg = tmp.pick();
+        load_constant(ksize_reg, ksize);
+        const gpr_t w_offset = tmp.pick();
+        rem(w_offset, channel, ksize_reg);
+        //int w_offset = c % ksize;
+        
+        const gpr_t h_offset = tmp.pick();
+        div(h_offset, channel, ksize_reg);
+        rem(h_offset, h_offset, ksize_reg);
+        //int h_offset = (c / ksize) % ksize;
+
+        const gpr_t c_im = tmp.pick();
+        div(c_im, channel, ksize_reg);
+        div(c_im, c_im, ksize_reg);
+        //int c_im = c / ksize / ksize;
+
+        const gpr_t ctmp = tmp.pick();
+        load_constant(ctmp, height_col);
+        mul(ctmp, ctmp, channel);
+        const gpr_t htmp = tmp.pick();
+        load_constant(htmp, height);
+        mul(htmp, htmp, c_im);
+
+        const gpr_t h = tmp.pick();
+        const gpr_t h_end = tmp.pick();
+        load_constant(h, 0);
+        load_constant(h_end, height_col);
+        L("heights");
+        //for (h = 0; h < height_col; ++h) {
+
+            const gpr_t im_row = tmp.pick();
+            load_constant(im_row, stride);
+            mul(im_row, im_row, h);
+            add(im_row, im_row, h_offset);
+
+            const gpr_t intermediate = tmp.pick();
+            load_constant(intermediate, width_col);
+            const gpr_t tmp1 = tmp.pick();
+            add(tmp1, ctmp, h);
+            mul(intermediate, tmp1, intermediate);
+            addi(im_row, im_row, -pad);
+            const gpr_t val = tmp.pick();
+            add(val, htmp, im_row);
+            load_constant(tmp1, width);
+            mul(val, val, tmp1);
+
+            const gpr_t w = tmp.pick();
+            const gpr_t w_end = tmp.pick();
+            load_constant(w, 0);
+            load_constant(w_end, width_col);
+            L("widths");
+
+                const gpr_t im_col = tmp.pick();
+                load_constant(im_col, stride);
+                mul(im_col, im_col, w);
+                add(im_col, im_col, w_offset);
+                addi(im_col, im_col, -pad);
+                const gpr_t col_index = tmp.pick();
+                add(col_index, intermediate, w);
+
+                //blt and bge
+                mul(col_index, col_index, sew);
+                add(col_index, col_index, vcol);
+                
+                load_constant(tmp1, 0);
+                char label[16] = "result_zero";
+                blt(im_row, tmp1, "result_zero");
+                blt(im_col, tmp1, "result_zero");
+                load_constant(tmp1, height);
+                bge(im_row, tmp1, "result_zero");
+                load_constant(tmp1, width);
+                bge(im_col, tmp1, "result_zero");
+
+
+                const gpr_t data_im = tmp.pick();
+                add(data_im, im_col, val);
+                mul(data_im, data_im, sew);
+                add(data_im, data_im, vsrc);
+                ld(tmp1, data_im, 0);
+                sd(tmp1, col_index, 0);
+                j("done");
+
+                L("result_zero");
+                
+                load_constant(tmp1, 0);
+                sd(tmp1, col_index, 0);
+                
+                L("done");
+
+            addi(w, w, 1);
+            blt(w, w_end, "widths");
+
+        addi(h, h, 1);
+        blt(h, h_end, "heights");
+
+
+    addi(channel, channel, 1);
+    blt(channel, c_end, "channels");
+
+}
 
 /***********************3. loop interchange with manual vectorization with ALPHA==1 double buffer ****************/
 /* Manual vectorization with loop interchange + loop unrolling with unroll degree 24*/
 void jit_convolution_kernel_t::gemm_nn_noalpha_unroll163loops(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,
-    int M, int N, int K, float ALPHA, int lda, int ldb, int ldc)
+    int M, int N, int K, float ALPHA, int A_offset, int lda, int B_offset, int ldb, int C_offset, int ldc, int unroll)
 {
+    tmp.reset();
+    for (int i = 0; i < nvregs; ++i)
+        vout[i] = static_cast<vr_t>(i);
+
     // Registers to serve as pointers to the arguments
     const gpr_t vsrc = tmp.pick(); // A address
     const gpr_t vwei = tmp.pick(); // B address
@@ -658,12 +385,15 @@ void jit_convolution_kernel_t::gemm_nn_noalpha_unroll163loops(rvjit::vr_t *vout,
     rvjit::assembler::ld(vsrc, a0, offsetof(jit_conv_kernel_args_t, inter));
     rvjit::assembler::ld(vwei, a0, offsetof(jit_conv_kernel_args_t, wei));
     rvjit::assembler::ld(vdst, a0, offsetof(jit_conv_kernel_args_t, inter2));
+    addi(vsrc, vsrc, A_offset);
+    addi(vwei, vwei, B_offset);
+    addi(vdst, vdst, C_offset);
 
     const int src_sew = types::data_type_size(cfg.src_dt);
     const gpr_t sew = tmp.pick();
     load_constant(sew, src_sew);
     const gpr_t vlen = tmp.pick();
-
+    load_constant(vlen, cfg.vlen);
     const gpr_t a_index = tmp.pick();
     const gpr_t b_index = tmp.pick();
     const gpr_t c_index = tmp.pick();
@@ -690,17 +420,3057 @@ void jit_convolution_kernel_t::gemm_nn_noalpha_unroll163loops(rvjit::vr_t *vout,
     const gpr_t i_left = tmp.pick();
     const gpr_t tmp1 = tmp.pick();
     load_constant(i, 0);
-    if(M>15){
+    if(M > 15 || (M > 7 && unroll == 8) || (M > 11 && unroll == 12) ||
+    (M > 31 && unroll == 32) ||(M > 23 && unroll == 24) || (unroll == 1)){
     load_constant(j, 0);
     load_constant(N_reg, N);
-    L("j");
+    char labelj[16];
+    snprintf(labelj, 16, "l%d", label_counter++);
+    L(labelj);
     //for ( j = 0; j < N; ) {
-    
-        load_constant(i, 0); 
-        load_constant(M_reg, M-15);
-        L("i");
-        //for (i = 0; i < M-15; i += 16) {
+        //vsetvli(x0, vlen, vsew(sew) | vlmul(1));
+        switch(unroll){
+            case 1: {
+                load_constant(i, 0); 
+                load_constant(M_reg, M);
+                char labeli[16];
+                snprintf(labeli, 16, "l%d", label_counter++);
+                L(labeli);
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc, c_index, src_sew);
+
+                    load_constant(k, 0);
+                    load_constant(K_reg, K);
+                    char labelk[16];
+                    snprintf(labelk, 16, "l%d", label_counter++);
+                    L(labelk);
+                    //for ( k = 0; k < K; k ++) {
+                        
+                        load_constant(ld_reg, ldb);
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb, b_index, src_sew);
+
+                        load_constant(ld_reg, lda);
+                        addi(a_index, i, 0);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        
+                        const fpr_t alpha_float = ft1;
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha, alpha_float);  
+                        
+                        vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B                
+                        
+                    // k loop
+                    addi(k, k, 1);
+                    blt(k, K_reg, labelk);
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc, c_index, src_sew);
+
+                // i loop 
+                addi(i, i, 1);
+                blt(i, M_reg, labeli);
+                break;
+            }
+            case 8: {
+                load_constant(i, 0); 
+                load_constant(M_reg, M-7);
+                char labeli[16];
+                snprintf(labeli, 16, "l%d", label_counter++);
+                L(labeli);
+                //for (i = 0; i < M-15; i += 16) {
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc, c_index, src_sew);
+
+                    addi(c_index, i, 1);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 2);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 3);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 4);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 5);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 6);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 7);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc7, c_index, src_sew);
+                    
+                    load_constant(k, 0);
+                    load_constant(K_reg, K);
+                    char labelk[16];
+                    snprintf(labelk, 16, "l%d", label_counter++);
+                    L(labelk);
+                    //for ( k = 0; k < K; k ++) {
+                        
+                        load_constant(ld_reg, ldb);
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb, b_index, src_sew);
+
+                        load_constant(ld_reg, lda);
+                        addi(a_index, i, 0);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        
+                        const fpr_t alpha_float = ft1;
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha, alpha_float);  
+                        
+                        vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 1);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha1, alpha_float);
+
+                        vfmacc_vv(vc1, vaalpha1, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 2);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha2, alpha_float);
+
+                        vfmacc_vv(vc2, vaalpha2, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 3);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha3, alpha_float);
+                        
+                        vfmacc_vv(vc3, vaalpha3, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 4); 
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha4, alpha_float);
+
+                        vfmacc_vv(vc4, vaalpha4, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 5);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha5, alpha_float);
+
+                        vfmacc_vv(vc5, vaalpha5, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 6);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha6, alpha_float);
+
+                        vfmacc_vv(vc6, vaalpha6, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 7);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha7, alpha_float);
+
+                        vfmacc_vv(vc7, vaalpha7, vb); // sum += ALPHA*A*B                       
+                        
+                    // k loop
+                    addi(k, k, 1);
+                    blt(k, K_reg, labelk);
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc, c_index, src_sew);
+
+                    addi(c_index, i, 1);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 2);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 3);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 4);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 5);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 6);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 7);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc7, c_index, src_sew);
+                    
+                // i loop 
+                addi(i, i, 8);
+                blt(i, M_reg, labeli);
+                break;
+            }
+            case 12: {
+                load_constant(i, 0); 
+                load_constant(M_reg, M-11);
+                char labeli[16];
+                snprintf(labeli, 16, "l%d", label_counter++);
+                L(labeli);
+                //for (i = 0; i < M-15; i += 16) {
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc, c_index, src_sew);
+
+                    addi(c_index, i, 1);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 2);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 3);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 4);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 5);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 6);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 7);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc7, c_index, src_sew);
+
+                    addi(c_index, i, 8);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc8, c_index, src_sew);
+
+                    addi(c_index, i, 9);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc9, c_index, src_sew);
+
+                    addi(c_index, i, 10);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc10, c_index, src_sew);
+
+                    addi(c_index, i, 11);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc11, c_index, src_sew);
+                    
+                    load_constant(k, 0);
+                    load_constant(K_reg, K);
+                    char labelk[16];
+                    snprintf(labelk, 16, "l%d", label_counter++);
+                    L(labelk);
+                    //for ( k = 0; k < K; k ++) {
+                        
+                        load_constant(ld_reg, ldb);
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb, b_index, src_sew);
+
+                        load_constant(ld_reg, lda);
+                        addi(a_index, i, 0);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        
+                        const fpr_t alpha_float = ft1;
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha, alpha_float);  
+                        
+                        vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 1);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha1, alpha_float);
+
+                        vfmacc_vv(vc1, vaalpha1, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 2);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha2, alpha_float);
+
+                        vfmacc_vv(vc2, vaalpha2, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 3);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha3, alpha_float);
+                        
+                        vfmacc_vv(vc3, vaalpha3, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 4); 
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha4, alpha_float);
+
+                        vfmacc_vv(vc4, vaalpha4, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 5);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha5, alpha_float);
+
+                        vfmacc_vv(vc5, vaalpha5, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 6);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha6, alpha_float);
+
+                        vfmacc_vv(vc6, vaalpha6, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 7);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha7, alpha_float);
+
+                        vfmacc_vv(vc7, vaalpha7, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 8);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha8, alpha_float);
+
+                        vfmacc_vv(vc8, vaalpha8, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 9);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha9, alpha_float);
+
+                        vfmacc_vv(vc9, vaalpha9, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 10);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha10, alpha_float);
+
+                        vfmacc_vv(vc10, vaalpha10, vb); // sum += ALPHA*A*B
+                    
+                        addi(a_index, i, 11);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha11, alpha_float);
+
+                        vfmacc_vv(vc11, vaalpha11, vb); // sum += ALPHA*A*B                        
+                        
+                    // k loop
+                    addi(k, k, 1);
+                    blt(k, K_reg, labelk);
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc, c_index, src_sew);
+
+                    addi(c_index, i, 1);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 2);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 3);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 4);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 5);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 6);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 7);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc7, c_index, src_sew);
+
+                    addi(c_index, i, 8);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc8, c_index, src_sew);
+
+                    addi(c_index, i, 9);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc9, c_index, src_sew);
+
+                    addi(c_index, i, 10);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc10, c_index, src_sew);
+
+                    addi(c_index, i, 11);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc11, c_index, src_sew);
+                    
+                // i loop 
+                addi(i, i, 12);
+                blt(i, M_reg, labeli);
+                break;
+            }
+            case 16: {
+                load_constant(i, 0); 
+                load_constant(M_reg, M-15);
+                char labeli[16];
+                snprintf(labeli, 16, "l%d", label_counter++);
+                L(labeli);
+                //for (i = 0; i < M-15; i += 16) {
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc, c_index, src_sew);
+
+                    addi(c_index, i, 1);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 2);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 3);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 4);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 5);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 6);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 7);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc7, c_index, src_sew);
+
+                    addi(c_index, i, 8);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc8, c_index, src_sew);
+
+                    addi(c_index, i, 9);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc9, c_index, src_sew);
+
+                    addi(c_index, i, 10);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc10, c_index, src_sew);
+
+                    addi(c_index, i, 11);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc11, c_index, src_sew);
+                
+                    addi(c_index, i, 12);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc12, c_index, src_sew);
+
+                    addi(c_index, i, 13);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc13, c_index, src_sew);
+
+                    addi(c_index, i, 14);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc14, c_index, src_sew);
+
+                    addi(c_index, i, 15);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc15, c_index, src_sew);
+                    
+                    load_constant(k, 0);
+                    load_constant(K_reg, K);
+                    char labelk[16];
+                    snprintf(labelk, 16, "l%d", label_counter++);
+                    L(labelk);
+                    //for ( k = 0; k < K; k ++) {
+                        
+                        load_constant(ld_reg, ldb);
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb, b_index, src_sew);
+
+                        load_constant(ld_reg, lda);
+                        addi(a_index, i, 0);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        
+                        const fpr_t alpha_float = ft1;
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha, alpha_float);  
+                        
+                        vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 1);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha1, alpha_float);
+
+                        vfmacc_vv(vc1, vaalpha1, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 2);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha2, alpha_float);
+
+                        vfmacc_vv(vc2, vaalpha2, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 3);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha3, alpha_float);
+                        
+                        vfmacc_vv(vc3, vaalpha3, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 4); 
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha4, alpha_float);
+
+                        vfmacc_vv(vc4, vaalpha4, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 5);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha5, alpha_float);
+
+                        vfmacc_vv(vc5, vaalpha5, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 6);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha6, alpha_float);
+
+                        vfmacc_vv(vc6, vaalpha6, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 7);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha7, alpha_float);
+
+                        vfmacc_vv(vc7, vaalpha7, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 8);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha8, alpha_float);
+
+                        vfmacc_vv(vc8, vaalpha8, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 9);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha9, alpha_float);
+
+                        vfmacc_vv(vc9, vaalpha9, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 10);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha10, alpha_float);
+
+                        vfmacc_vv(vc10, vaalpha10, vb); // sum += ALPHA*A*B
+                    
+                        addi(a_index, i, 11);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha11, alpha_float);
+
+                        vfmacc_vv(vc11, vaalpha11, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 12);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha12, alpha_float);
+
+                        vfmacc_vv(vc12, vaalpha12, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 13);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha13, alpha_float);
+
+                        vfmacc_vv(vc13, vaalpha13, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 14);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha14, alpha_float);
+
+                        vfmacc_vv(vc14, vaalpha14, vb); // sum += ALPHA*A*B
+
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb1, b_index, src_sew);
+
+                        addi(a_index, i, 15);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha15, alpha_float);
+
+                        vfmacc_vv(vc15, vaalpha15, vb1); // sum += ALPHA*A*B
+                        vl(vb, b_index, src_sew);
+                        
+                        
+                    // k loop
+                    addi(k, k, 1);
+                    blt(k, K_reg, labelk);
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc, c_index, src_sew);
+
+                    addi(c_index, i, 1);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 2);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 3);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 4);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 5);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 6);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 7);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc7, c_index, src_sew);
+
+                    addi(c_index, i, 8);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc8, c_index, src_sew);
+
+                    addi(c_index, i, 9);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc9, c_index, src_sew);
+
+                    addi(c_index, i, 10);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc10, c_index, src_sew);
+
+                    addi(c_index, i, 11);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc11, c_index, src_sew);
+
+                    addi(c_index, i, 12);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc12, c_index, src_sew);
+
+                    addi(c_index, i, 13);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc13, c_index, src_sew);
+
+                    addi(c_index, i, 14);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc14, c_index, src_sew);
+
+                    addi(c_index, i, 15);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc15, c_index, src_sew);
+                    
+                // i loop 
+                addi(i, i, 16);
+                blt(i, M_reg, labeli);
+                break;
+            }
+            case 24: {
+                load_constant(i, 0); 
+                load_constant(M_reg, M-23);
+                char labeli[16];
+                snprintf(labeli, 16, "l%d", label_counter++);
+                L(labeli);
+                //for (i = 0; i < M-15; i += 16) {
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc, c_index, src_sew);
+
+                    addi(c_index, i, 1);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 2);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 3);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 4);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 5);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 6);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 7);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc7, c_index, src_sew);
+
+                    addi(c_index, i, 8);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc8, c_index, src_sew);
+
+                    addi(c_index, i, 9);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc9, c_index, src_sew);
+
+                    addi(c_index, i, 10);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc10, c_index, src_sew);
+
+                    addi(c_index, i, 11);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc11, c_index, src_sew);
+                
+                    addi(c_index, i, 12);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc12, c_index, src_sew);
+
+                    addi(c_index, i, 13);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc13, c_index, src_sew);
+
+                    addi(c_index, i, 14);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc14, c_index, src_sew);
+
+                    addi(c_index, i, 15);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc15, c_index, src_sew);
+                    
+                    load_constant(k, 0);
+                    load_constant(K_reg, K);
+                    char labelk[16];
+                    snprintf(labelk, 16, "l%d", label_counter++);
+                    L(labelk);
+                    //for ( k = 0; k < K; k ++) {
+                        
+                        load_constant(ld_reg, ldb);
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb, b_index, src_sew);
+
+                        load_constant(ld_reg, lda);
+                        addi(a_index, i, 0);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        
+                        const fpr_t alpha_float = ft1;
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha, alpha_float);  
+                        
+                        vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 1);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha1, alpha_float);
+
+                        vfmacc_vv(vc1, vaalpha1, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 2);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha2, alpha_float);
+
+                        vfmacc_vv(vc2, vaalpha2, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 3);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha3, alpha_float);
+                        
+                        vfmacc_vv(vc3, vaalpha3, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 4); 
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha4, alpha_float);
+
+                        vfmacc_vv(vc4, vaalpha4, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 5);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha5, alpha_float);
+
+                        vfmacc_vv(vc5, vaalpha5, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 6);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha6, alpha_float);
+
+                        vfmacc_vv(vc6, vaalpha6, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 7);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha7, alpha_float);
+
+                        vfmacc_vv(vc7, vaalpha7, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 8);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha8, alpha_float);
+
+                        vfmacc_vv(vc8, vaalpha8, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 9);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha9, alpha_float);
+
+                        vfmacc_vv(vc9, vaalpha9, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 10);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha10, alpha_float);
+
+                        vfmacc_vv(vc10, vaalpha10, vb); // sum += ALPHA*A*B
+                    
+                        addi(a_index, i, 11);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha11, alpha_float);
+
+                        vfmacc_vv(vc11, vaalpha11, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 12);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha12, alpha_float);
+
+                        vfmacc_vv(vc12, vaalpha12, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 13);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha13, alpha_float);
+
+                        vfmacc_vv(vc13, vaalpha13, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 14);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha14, alpha_float);
+
+                        vfmacc_vv(vc14, vaalpha14, vb); // sum += ALPHA*A*B
+
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb1, b_index, src_sew);
+
+                        addi(a_index, i, 15);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha15, alpha_float);
+
+                        vfmacc_vv(vc15, vaalpha15, vb1); // sum += ALPHA*A*B
+                        vl(vb, b_index, src_sew);
+                        
+                        
+                    // k loop
+                    addi(k, k, 1);
+                    blt(k, K_reg, labelk);
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc, c_index, src_sew);
+
+                    addi(c_index, i, 1);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 2);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 3);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 4);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 5);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 6);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 7);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc7, c_index, src_sew);
+
+                    addi(c_index, i, 8);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc8, c_index, src_sew);
+
+                    addi(c_index, i, 9);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc9, c_index, src_sew);
+
+                    addi(c_index, i, 10);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc10, c_index, src_sew);
+
+                    addi(c_index, i, 11);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc11, c_index, src_sew);
+
+                    addi(c_index, i, 12);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc12, c_index, src_sew);
+
+                    addi(c_index, i, 13);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc13, c_index, src_sew);
+
+                    addi(c_index, i, 14);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc14, c_index, src_sew);
+
+                    addi(c_index, i, 15);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc15, c_index, src_sew);
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 16);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc, c_index, src_sew);
+
+                    addi(c_index, i, 17);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 18);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 19);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 20);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 21);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 22);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 23);
+                    mul(c_index, c_index, ld_reg);  
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc7, c_index, src_sew);
+                    
+                    load_constant(k, 0);
+                    load_constant(K_reg, K);
+                    char labelk1[16];
+                    snprintf(labelk1, 16, "l%d", label_counter++);
+                    L(labelk1);
+                    //for ( k = 0; k < K; k ++) {
+                        
+                        load_constant(ld_reg, ldb);
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb, b_index, src_sew);
+
+                        load_constant(ld_reg, lda);
+                        addi(a_index, i, 0);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha, alpha_float);  
+                        
+                        vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 1);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha1, alpha_float);
+
+                        vfmacc_vv(vc1, vaalpha1, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 2);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha2, alpha_float);
+
+                        vfmacc_vv(vc2, vaalpha2, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 3);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha3, alpha_float);
+                        
+                        vfmacc_vv(vc3, vaalpha3, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 4); 
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha4, alpha_float);
+
+                        vfmacc_vv(vc4, vaalpha4, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 5);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha5, alpha_float);
+
+                        vfmacc_vv(vc5, vaalpha5, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 6);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha6, alpha_float);
+
+                        vfmacc_vv(vc6, vaalpha6, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 7);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha7, alpha_float);
+
+                        vfmacc_vv(vc7, vaalpha7, vb); // sum += ALPHA*A*B                       
+                        
+                    // k loop
+                    addi(k, k, 1);
+                    blt(k, K_reg, labelk1);
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 16);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc, c_index, src_sew);
+
+                    addi(c_index, i, 17);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 18);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 19);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 20);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 21);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 22);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 23);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc7, c_index, src_sew);
+                // i loop 
+                addi(i, i, 24);
+                blt(i, M_reg, labeli);
+                break;
+            }
+            case 32: {
+                load_constant(i, 0); 
+                load_constant(M_reg, M-31);
+                char labeli[16];
+                snprintf(labeli, 16, "l%d", label_counter++);
+                L(labeli);
+                //for (i = 0; i < M-15; i += 16) {
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc, c_index, src_sew);
+
+                    addi(c_index, i, 1);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 2);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 3);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 4);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 5);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 6);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 7);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc7, c_index, src_sew);
+
+                    addi(c_index, i, 8);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc8, c_index, src_sew);
+
+                    addi(c_index, i, 9);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc9, c_index, src_sew);
+
+                    addi(c_index, i, 10);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc10, c_index, src_sew);
+
+                    addi(c_index, i, 11);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc11, c_index, src_sew);
+                
+                    addi(c_index, i, 12);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc12, c_index, src_sew);
+
+                    addi(c_index, i, 13);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc13, c_index, src_sew);
+
+                    addi(c_index, i, 14);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc14, c_index, src_sew);
+
+                    addi(c_index, i, 15);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc15, c_index, src_sew);
+                    
+                    load_constant(k, 0);
+                    load_constant(K_reg, K);
+                    char labelk[16];
+                    snprintf(labelk, 16, "l%d", label_counter++);
+                    L(labelk);
+                    //for ( k = 0; k < K; k ++) {
+                        
+                        load_constant(ld_reg, ldb);
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb, b_index, src_sew);
+
+                        load_constant(ld_reg, lda);
+                        addi(a_index, i, 0);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        
+                        const fpr_t alpha_float = ft1;
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha, alpha_float);  
+                        
+                        vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 1);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha1, alpha_float);
+
+                        vfmacc_vv(vc1, vaalpha1, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 2);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha2, alpha_float);
+
+                        vfmacc_vv(vc2, vaalpha2, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 3);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha3, alpha_float);
+                        
+                        vfmacc_vv(vc3, vaalpha3, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 4); 
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha4, alpha_float);
+
+                        vfmacc_vv(vc4, vaalpha4, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 5);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha5, alpha_float);
+
+                        vfmacc_vv(vc5, vaalpha5, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 6);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha6, alpha_float);
+
+                        vfmacc_vv(vc6, vaalpha6, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 7);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha7, alpha_float);
+
+                        vfmacc_vv(vc7, vaalpha7, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 8);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha8, alpha_float);
+
+                        vfmacc_vv(vc8, vaalpha8, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 9);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha9, alpha_float);
+
+                        vfmacc_vv(vc9, vaalpha9, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 10);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha10, alpha_float);
+
+                        vfmacc_vv(vc10, vaalpha10, vb); // sum += ALPHA*A*B
+                    
+                        addi(a_index, i, 11);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha11, alpha_float);
+
+                        vfmacc_vv(vc11, vaalpha11, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 12);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha12, alpha_float);
+
+                        vfmacc_vv(vc12, vaalpha12, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 13);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha13, alpha_float);
+
+                        vfmacc_vv(vc13, vaalpha13, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 14);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha14, alpha_float);
+
+                        vfmacc_vv(vc14, vaalpha14, vb); // sum += ALPHA*A*B
+
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb1, b_index, src_sew);
+
+                        addi(a_index, i, 15);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha15, alpha_float);
+
+                        vfmacc_vv(vc15, vaalpha15, vb1); // sum += ALPHA*A*B
+                        vl(vb, b_index, src_sew);
+                        
+                        
+                    // k loop
+                    addi(k, k, 1);
+                    blt(k, K_reg, labelk);
+
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc, c_index, src_sew);
+
+                    addi(c_index, i, 1);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 2);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 3);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 4);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 5);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 6);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 7);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc7, c_index, src_sew);
+
+                    addi(c_index, i, 8);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc8, c_index, src_sew);
+
+                    addi(c_index, i, 9);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc9, c_index, src_sew);
+
+                    addi(c_index, i, 10);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc10, c_index, src_sew);
+
+                    addi(c_index, i, 11);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc11, c_index, src_sew);
+
+                    addi(c_index, i, 12);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc12, c_index, src_sew);
+
+                    addi(c_index, i, 13);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc13, c_index, src_sew);
+
+                    addi(c_index, i, 14);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc14, c_index, src_sew);
+
+                    addi(c_index, i, 15);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc15, c_index, src_sew);
+
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 16);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc, c_index, src_sew);
+
+                    addi(c_index, i, 17);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 18);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 19);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 20);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 21);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 22);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 23);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc7, c_index, src_sew);
+
+                    addi(c_index, i, 24);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc8, c_index, src_sew);
+
+                    addi(c_index, i, 25);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc9, c_index, src_sew);
+
+                    addi(c_index, i, 26);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc10, c_index, src_sew);
+
+                    addi(c_index, i, 27);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc11, c_index, src_sew);
+                
+                    addi(c_index, i, 28);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc12, c_index, src_sew);
+
+                    addi(c_index, i, 29);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc13, c_index, src_sew);
+
+                    addi(c_index, i, 30);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc14, c_index, src_sew);
+
+                    addi(c_index, i, 31);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc15, c_index, src_sew);
+
+                    load_constant(k, 0);
+                    load_constant(K_reg, K);
+                    char labelk1[16];
+                    snprintf(labelk1, 16, "l%d", label_counter++);
+                    L(labelk1);
+                    //for ( k = 0; k < K; k ++) {
+                        
+                        load_constant(ld_reg, ldb);
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb, b_index, src_sew);
+
+                        load_constant(ld_reg, lda);
+                        addi(a_index, i, 0);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha, alpha_float);  
+                        
+                        vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 1);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha1, alpha_float);
+
+                        vfmacc_vv(vc1, vaalpha1, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 2);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha2, alpha_float);
+
+                        vfmacc_vv(vc2, vaalpha2, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 3);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha3, alpha_float);
+                        
+                        vfmacc_vv(vc3, vaalpha3, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 4); 
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha4, alpha_float);
+
+                        vfmacc_vv(vc4, vaalpha4, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 5);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha5, alpha_float);
+
+                        vfmacc_vv(vc5, vaalpha5, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 6);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha6, alpha_float);
+
+                        vfmacc_vv(vc6, vaalpha6, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 7);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha7, alpha_float);
+
+                        vfmacc_vv(vc7, vaalpha7, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 8);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha8, alpha_float);
+
+                        vfmacc_vv(vc8, vaalpha8, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 9);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha9, alpha_float);
+
+                        vfmacc_vv(vc9, vaalpha9, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 10);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha10, alpha_float);
+
+                        vfmacc_vv(vc10, vaalpha10, vb); // sum += ALPHA*A*B
+                    
+                        addi(a_index, i, 11);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha11, alpha_float);
+
+                        vfmacc_vv(vc11, vaalpha11, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 12);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha12, alpha_float);
+
+                        vfmacc_vv(vc12, vaalpha12, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 13);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha13, alpha_float);
+
+                        vfmacc_vv(vc13, vaalpha13, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 14);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha14, alpha_float);
+
+                        vfmacc_vv(vc14, vaalpha14, vb); // sum += ALPHA*A*B
+
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb1, b_index, src_sew);
+
+                        addi(a_index, i, 15);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha15, alpha_float);
+
+                        vfmacc_vv(vc15, vaalpha15, vb1); // sum += ALPHA*A*B
+                        vl(vb, b_index, src_sew);
+                        
+                        
+                    // k loop
+                    addi(k, k, 1);
+                    blt(k, K_reg, labelk1);
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 16);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc, c_index, src_sew);
+
+                    addi(c_index, i, 17);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 18);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 19);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 20);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 21);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 22);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 23);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc7, c_index, src_sew);
+
+                    addi(c_index, i, 24);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc8, c_index, src_sew);
+
+                    addi(c_index, i, 25);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc9, c_index, src_sew);
+
+                    addi(c_index, i, 26);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc10, c_index, src_sew);
+
+                    addi(c_index, i, 27);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc11, c_index, src_sew);
+
+                    addi(c_index, i, 28);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc12, c_index, src_sew);
+
+                    addi(c_index, i, 29);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc13, c_index, src_sew);
+
+                    addi(c_index, i, 30);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc14, c_index, src_sew);
+
+                    addi(c_index, i, 31);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc15, c_index, src_sew);
+                    
+                // i loop 
+                addi(i, i, 32);
+                blt(i, M_reg, labeli);
+                break;
+            }
+            default: {
+                load_constant(i, 0); 
+                load_constant(M_reg, M-15);
+                char labeli[16];
+                snprintf(labeli, 16, "l%d", label_counter++);
+                L(labeli);
+                //for (i = 0; i < M-15; i += 16) {
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc, c_index, src_sew);
+
+                    addi(c_index, i, 1);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);   
+                    vl(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 2);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 3);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 4);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 5);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 6);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 7);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc7, c_index, src_sew);
+
+                    addi(c_index, i, 8);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc8, c_index, src_sew);
+
+                    addi(c_index, i, 9);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc9, c_index, src_sew);
+
+                    addi(c_index, i, 10);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc10, c_index, src_sew);
+
+                    addi(c_index, i, 11);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc11, c_index, src_sew);
+                
+                    addi(c_index, i, 12);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc12, c_index, src_sew);
+
+                    addi(c_index, i, 13);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc13, c_index, src_sew);
+
+                    addi(c_index, i, 14);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc14, c_index, src_sew);
+
+                    addi(c_index, i, 15);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);     
+                    mul(c_index, c_index, sew);    
+                    add(c_index, c_index, vdst);              
+                    vl(vc15, c_index, src_sew);
+                    
+                    load_constant(k, 0);
+                    load_constant(K_reg, K);
+                    char labelk[16];
+                    snprintf(labelk, 16, "l%d", label_counter++);
+                    L(labelk);
+                    //for ( k = 0; k < K; k ++) {
+                        
+                        load_constant(ld_reg, ldb);
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb, b_index, src_sew);
+
+                        load_constant(ld_reg, lda);
+                        addi(a_index, i, 0);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        
+                        const fpr_t alpha_float = ft1;
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha, alpha_float);  
+                        
+                        vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 1);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha1, alpha_float);
+
+                        vfmacc_vv(vc1, vaalpha1, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 2);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha2, alpha_float);
+
+                        vfmacc_vv(vc2, vaalpha2, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 3);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha3, alpha_float);
+                        
+                        vfmacc_vv(vc3, vaalpha3, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 4); 
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha4, alpha_float);
+
+                        vfmacc_vv(vc4, vaalpha4, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 5);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha5, alpha_float);
+
+                        vfmacc_vv(vc5, vaalpha5, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 6);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+                        vfmv_sf(vaalpha6, alpha_float);
+
+                        vfmacc_vv(vc6, vaalpha6, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 7);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha7, alpha_float);
+
+                        vfmacc_vv(vc7, vaalpha7, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 8);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha8, alpha_float);
+
+                        vfmacc_vv(vc8, vaalpha8, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 9);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha9, alpha_float);
+
+                        vfmacc_vv(vc9, vaalpha9, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 10);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha10, alpha_float);
+
+                        vfmacc_vv(vc10, vaalpha10, vb); // sum += ALPHA*A*B
+                    
+                        addi(a_index, i, 11);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha11, alpha_float);
+
+                        vfmacc_vv(vc11, vaalpha11, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 12);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha12, alpha_float);
+
+                        vfmacc_vv(vc12, vaalpha12, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 13);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha13, alpha_float);
+
+                        vfmacc_vv(vc13, vaalpha13, vb); // sum += ALPHA*A*B
+
+                        addi(a_index, i, 14);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha14, alpha_float);
+
+                        vfmacc_vv(vc14, vaalpha14, vb); // sum += ALPHA*A*B
+
+                        addi(b_index, k, 0);
+                        mul(b_index, b_index, ld_reg);
+                        add(b_index, b_index, j);
+                        mul(b_index, b_index, sew);
+                        add(b_index, b_index, vwei);
+                        vl(vb1, b_index, src_sew);
+
+                        addi(a_index, i, 15);
+                        mul(a_index, a_index, ld_reg);
+                        add(a_index, a_index, k);
+                        mul(a_index, a_index, sew);
+                        add(a_index, a_index, vsrc);
+                        flw(alpha_float, a_index, 0);
+
+                        vfmv_sf(vaalpha15, alpha_float);
+
+                        vfmacc_vv(vc15, vaalpha15, vb1); // sum += ALPHA*A*B
+                        vl(vb, b_index, src_sew);
+                        
+                        
+                    // k loop
+                    addi(k, k, 1);
+                    blt(k, K_reg, labelk);
+                    
+                    load_constant(ld_reg, ldc);
+                    addi(c_index, i, 0);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc, c_index, src_sew);
+
+                    addi(c_index, i, 1);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc1, c_index, src_sew);
+
+                    addi(c_index, i, 2);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc2, c_index, src_sew);
+
+                    addi(c_index, i, 3);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc3, c_index, src_sew);
+
+                    addi(c_index, i, 4);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc4, c_index, src_sew);
+
+                    addi(c_index, i, 5);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc5, c_index, src_sew);
+
+                    addi(c_index, i, 6);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc6, c_index, src_sew);
+
+                    addi(c_index, i, 7);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc7, c_index, src_sew);
+
+                    addi(c_index, i, 8);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc8, c_index, src_sew);
+
+                    addi(c_index, i, 9);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc9, c_index, src_sew);
+
+                    addi(c_index, i, 10);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc10, c_index, src_sew);
+
+                    addi(c_index, i, 11);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc11, c_index, src_sew);
+
+                    addi(c_index, i, 12);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc12, c_index, src_sew);
+
+                    addi(c_index, i, 13);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc13, c_index, src_sew);
+
+                    addi(c_index, i, 14);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc14, c_index, src_sew);
+
+                    addi(c_index, i, 15);
+                    mul(c_index, c_index, ld_reg);
+                    add(c_index, c_index, j);
+                    mul(c_index, c_index, sew);
+                    add(c_index, c_index, vdst);
+                    vs(vc15, c_index, src_sew);
+                    
+                // i loop 
+                addi(i, i, 16);
+                blt(i, M_reg, labeli);
+                break;
+            }
             
+        }
+        
+    // j loop
+
+    //load_constant(tmp1, N);
+    //sub(tmp1, tmp1, j);
+    //add(j, j, tmp1);
+    addi(j, j, (cfg.vlen/(src_sew*4)));
+    blt(j, N_reg, labelj); 
+    
+    } // If M>15
+    addi(i_left, i, 0);
+    load_constant(j, 0);
+    load_constant(N_reg, N);
+    char labelj10[16];
+    snprintf(labelj10, 16, "l%d", label_counter++);
+    L(labelj10);
+
+        load_constant(i, 0); 
+        load_constant(M_reg, M);
+        char labeli10[16];
+        snprintf(labeli10, 16, "l%d", label_counter++);
+        L(labeli10);
+        
             load_constant(ld_reg, ldc);
             addi(c_index, i, 0);
             mul(c_index, c_index, ld_reg);
@@ -709,121 +3479,18 @@ void jit_convolution_kernel_t::gemm_nn_noalpha_unroll163loops(rvjit::vr_t *vout,
             add(c_index, c_index, vdst);   
             vl(vc, c_index, src_sew);
 
-            addi(c_index, i, 1);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);   
-            vl(vc1, c_index, src_sew);
-
-            addi(c_index, i, 2);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc2, c_index, src_sew);
-
-            addi(c_index, i, 3);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc3, c_index, src_sew);
-
-            addi(c_index, i, 4);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc4, c_index, src_sew);
-
-            addi(c_index, i, 5);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc5, c_index, src_sew);
-
-            addi(c_index, i, 6);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc6, c_index, src_sew);
-
-            addi(c_index, i, 7);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc7, c_index, src_sew);
-
-            addi(c_index, i, 8);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc8, c_index, src_sew);
-
-            addi(c_index, i, 9);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc9, c_index, src_sew);
-
-            addi(c_index, i, 10);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc10, c_index, src_sew);
-
-            addi(c_index, i, 11);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc11, c_index, src_sew);
-        
-            addi(c_index, i, 12);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc12, c_index, src_sew);
-
-            addi(c_index, i, 13);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc13, c_index, src_sew);
-
-            addi(c_index, i, 14);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc14, c_index, src_sew);
-
-            addi(c_index, i, 15);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);     
-            mul(c_index, c_index, sew);    
-            add(c_index, c_index, vdst);              
-            vl(vc15, c_index, src_sew);
-            
             load_constant(k, 0);
             load_constant(K_reg, K);
-            L("k");
+            char labelk10[16];
+            snprintf(labelk10, 16, "l%d", label_counter++);
+            L(labelk10);
             //for ( k = 0; k < K; k ++) {
-                
+            
                 load_constant(ld_reg, ldb);
                 addi(b_index, k, 0);
                 mul(b_index, b_index, ld_reg);
                 add(b_index, b_index, j);
-                //mul(b_index, b_index, sew);
+                mul(b_index, b_index, sew);
                 add(b_index, b_index, vwei);
                 vl(vb, b_index, src_sew);
 
@@ -831,436 +3498,19 @@ void jit_convolution_kernel_t::gemm_nn_noalpha_unroll163loops(rvjit::vr_t *vout,
                 addi(a_index, i, 0);
                 mul(a_index, a_index, ld_reg);
                 add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
+                mul(a_index, a_index, sew);
                 add(a_index, a_index, vsrc);
                 
                 const fpr_t alpha_float = ft1;
                 flw(alpha_float, a_index, 0);
                 vfmv_sf(vaalpha, alpha_float);  
                 
-                vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 1);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-                vfmv_sf(vaalpha1, alpha_float);
-
-                vfmacc_vv(vc1, vaalpha1, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 2);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-                vfmv_sf(vaalpha2, alpha_float);
-
-                vfmacc_vv(vc2, vaalpha2, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 3);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-                vfmv_sf(vaalpha3, alpha_float);
-                
-                vfmacc_vv(vc3, vaalpha3, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 4); 
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-                vfmv_sf(vaalpha4, alpha_float);
-
-                vfmacc_vv(vc4, vaalpha4, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 5);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-                vfmv_sf(vaalpha5, alpha_float);
-
-                vfmacc_vv(vc5, vaalpha5, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 6);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-                vfmv_sf(vaalpha6, alpha_float);
-
-                vfmacc_vv(vc6, vaalpha6, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 7);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-
-                vfmv_sf(vaalpha7, alpha_float);
-
-                vfmacc_vv(vc7, vaalpha7, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 8);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-
-                vfmv_sf(vaalpha8, alpha_float);
-
-                vfmacc_vv(vc8, vaalpha8, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 9);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-
-                vfmv_sf(vaalpha9, alpha_float);
-
-                vfmacc_vv(vc9, vaalpha9, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 10);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-
-                vfmv_sf(vaalpha10, alpha_float);
-
-                vfmacc_vv(vc10, vaalpha10, vb); // sum += ALPHA*A*B
+                vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B                
             
-                addi(a_index, i, 11);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-
-                vfmv_sf(vaalpha11, alpha_float);
-
-                vfmacc_vv(vc11, vaalpha11, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 12);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-
-                vfmv_sf(vaalpha12, alpha_float);
-
-                vfmacc_vv(vc12, vaalpha12, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 13);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-
-                vfmv_sf(vaalpha13, alpha_float);
-
-                vfmacc_vv(vc13, vaalpha13, vb); // sum += ALPHA*A*B
-
-                addi(a_index, i, 14);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-
-                vfmv_sf(vaalpha14, alpha_float);
-
-                vfmacc_vv(vc14, vaalpha14, vb); // sum += ALPHA*A*B
-
-                addi(b_index, k, 0);
-                mul(b_index, b_index, ld_reg);
-                add(b_index, b_index, j);
-                //mul(b_index, b_index, sew);
-                add(b_index, b_index, vwei);
-                vl(vb1, b_index, src_sew);
-
-                addi(a_index, i, 15);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-
-                vfmv_sf(vaalpha15, alpha_float);
-
-                vfmacc_vv(vc15, vaalpha15, vb1); // sum += ALPHA*A*B
-                
             // k loop
             addi(k, k, 1);
-            blt(k, K_reg, "k");
-            
-            load_constant(ld_reg, ldc);
-            addi(c_index, i, 0);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc, c_index, src_sew);
-
-            addi(c_index, i, 1);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc1, c_index, src_sew);
-
-            addi(c_index, i, 2);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc2, c_index, src_sew);
-
-            addi(c_index, i, 3);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc3, c_index, src_sew);
-
-            addi(c_index, i, 4);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc4, c_index, src_sew);
-
-            addi(c_index, i, 5);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc5, c_index, src_sew);
-
-            addi(c_index, i, 6);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc6, c_index, src_sew);
-
-            addi(c_index, i, 7);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc7, c_index, src_sew);
-
-            addi(c_index, i, 8);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc8, c_index, src_sew);
-
-            addi(c_index, i, 9);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc9, c_index, src_sew);
-
-            addi(c_index, i, 10);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc10, c_index, src_sew);
-
-            addi(c_index, i, 11);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc11, c_index, src_sew);
-
-            addi(c_index, i, 12);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc12, c_index, src_sew);
-
-            addi(c_index, i, 13);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc13, c_index, src_sew);
-
-            addi(c_index, i, 14);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc14, c_index, src_sew);
-
-            addi(c_index, i, 15);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc15, c_index, src_sew);
-            
-        // i loop 
-        addi(i, i, 16);
-        blt(i, M_reg, "i");
-    // j loop
-    addi(j, j, cfg.vlen);
-    blt(j, N_reg, "j"); 
-    
-    } // If M>15
-    
-   
-    addi(i_left, i, 0);
-    load_constant(j, 0);
-    L("j1");
-    //for (int j = 0; j < N; j += gvl;) {
+            blt(k, K_reg, labelk10);
         
-        addi(i, i_left, 0);
-        load_constant(M_reg, M);
-        L("i1");
-        //for (i=i_left; i < M; i += 4) { // change according to unroll degree
-            
-            load_constant(ld_reg, ldc);
-            addi(c_index, i, 0);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vl(vc, c_index, src_sew);
-
-            addi(tmp1, i, 1);
-            bge(tmp1, M_reg, "vc2");
-            addi(c_index, i, 1);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vl(vc1, c_index, src_sew);
-
-            L("vc2");
-            addi(tmp1, i, 2);
-            bge(tmp1, M_reg, "vc3");
-            addi(c_index, i, 2);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vl(vc2, c_index, src_sew);
-
-            L("vc3");
-            addi(tmp1, i, 3);
-            bge(tmp1, M_reg, "skip");
-            addi(c_index, i, 3);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vl(vc3, c_index, src_sew);
-            
-            L("skip");
-            
-            load_constant(k, 0);
-            load_constant(K_reg, K);
-            L("k1");
-            //for (int k = 0; k < K; k ++) {
-                
-                load_constant(ld_reg, lda);
-                addi(a_index, i, 0);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                const fpr_t alpha_float = ft0;
-                flw(alpha_float, a_index, 0);
-                vfmv_sf(vaalpha, alpha_float);
-                
-                addi(tmp1, i, 1);
-                bge(tmp1, M_reg, "va2");
-                addi(a_index, i, 1);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);  
-                vfmv_sf(vaalpha1, alpha_float);
-
-                L("va2");
-                addi(tmp1, i, 2);
-                bge(tmp1, M_reg, "va3");
-                addi(a_index, i, 2);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-                vfmv_sf(vaalpha2, alpha_float);
-
-                L("va3");
-                addi(tmp1, i, 3);
-                bge(tmp1, M_reg, "skip1");
-                addi(a_index, i, 3);
-                mul(a_index, a_index, ld_reg);
-                add(a_index, a_index, k);
-                //mul(a_index, a_index, sew);
-                add(a_index, a_index, vsrc);
-                flw(alpha_float, a_index, 0);
-                vfmv_sf(vaalpha3, alpha_float);
-
-                L("skip1");
-
-                load_constant(ld_reg, ldb);
-                addi(b_index, k, 0);
-                mul(b_index, b_index, ld_reg);
-                add(b_index, b_index, j);
-                //mul(b_index, b_index, sew);
-                add(b_index, b_index, vwei);
-                vl(vb, b_index, src_sew);    
-
-                vfmacc_vv(vc, vaalpha, vb); // sum += ALPHA*A*B
-
-                addi(tmp1, i, 1);
-                bge(tmp1, M_reg, "vc21");
-                vfmacc_vv(vc1, vaalpha1, vb); // sum += ALPHA*A*B
-
-                L("vc21");
-                addi(tmp1, i, 2);
-                bge(tmp1, M_reg, "vc31");
-                vfmacc_vv(vc2, vaalpha2, vb); // sum += ALPHA*A*B
-                
-                L("vc31");
-                addi(tmp1, i, 3);
-                bge(tmp1, M_reg, "skip2");
-                vfmacc_vv(vc3, vaalpha3, vb); // sum += ALPHA*A*B
-                
-                L("skip2");
-                
-
-            addi(k, k, 1);
-            blt(k, K_reg, "k1");
-            
             load_constant(ld_reg, ldc);
             addi(c_index, i, 0);
             mul(c_index, c_index, ld_reg);
@@ -1269,57 +3519,26 @@ void jit_convolution_kernel_t::gemm_nn_noalpha_unroll163loops(rvjit::vr_t *vout,
             add(c_index, c_index, vdst);
             vs(vc, c_index, src_sew);
 
-            //if (i+1 < M)      {__builtin_epi_vstore_2xf32(&C[(i+1)*ldc+j], vc1, gvl);}
-            //if (i+2 < M)      {__builtin_epi_vstore_2xf32(&C[(i+2)*ldc+j], vc2, gvl);}
-            //if (i+3 < M)      {__builtin_epi_vstore_2xf32(&C[(i+3)*ldc+j], vc3, gvl);}
-            L("vc12");
-            addi(tmp1, i, 1);
-            bge(tmp1, M_reg, "vc22");
-            addi(c_index, i, 1);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc1, c_index, src_sew);
+        // i loop 
+        addi(i, i, 1);
+        blt(i, M_reg, labeli10);
+        
+    addi(j, j, (cfg.vlen/(src_sew*4)));
+    blt(j, N_reg, labelj10); 
 
-            L("vc22");
-            addi(tmp1, i, 2);
-            bge(tmp1, M_reg, "vc32");
-            addi(c_index, i, 2);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc2, c_index, src_sew);
-
-            L("vc32");
-            addi(tmp1, i, 3);
-            bge(tmp1, M_reg, "skip3");
-            addi(c_index, i, 3);
-            mul(c_index, c_index, ld_reg);
-            add(c_index, c_index, j);
-            mul(c_index, c_index, sew);
-            add(c_index, c_index, vdst);
-            vs(vc3, c_index, src_sew);
-            
-            L("skip3");
-            
-        // i1 loop
-        addi(i, i, 4); // change according to unroll degree
-        blt(i, M_reg, "i1");
-
-    // j1 loop
-    addi(j, j, cfg.vlen);
-    blt(j, N_reg, "j1");
 
 }
 
+void jit_convolution_kernel_t::gemm_nn_original(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, 
+int M, int N, int K, float ALPHA, int A_offset, int lda, int B_offset, int ldb, int C_offset, int ldc){
 
-/***********************3. loop interchange with manual vectorization with ALPHA=1****************/
-/* Manual vectorization with loop interchange + loop unrolling*/
-/*void jit_convolution_kernel_t::gemm_nn_noalpha(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,
-    int M, int N, int K, float ALPHA, int lda,, int ldb, int ldc)
-{
+    // Define block sizes, usually tuned for specific hardware
+    tmp.reset();
+    for (int i = 0; i < nvregs; ++i)
+        vout[i] = static_cast<vr_t>(i);
+
+    float* ALPHA_ptr = new float[1];
+    ALPHA_ptr[0] = ALPHA;
     // Registers to serve as pointers to the arguments
     const gpr_t vsrc = tmp.pick(); // A address
     const gpr_t vwei = tmp.pick(); // B address
@@ -1329,481 +3548,157 @@ void jit_convolution_kernel_t::gemm_nn_noalpha_unroll163loops(rvjit::vr_t *vout,
     rvjit::assembler::ld(vsrc, a0, offsetof(jit_conv_kernel_args_t, inter));
     rvjit::assembler::ld(vwei, a0, offsetof(jit_conv_kernel_args_t, wei));
     rvjit::assembler::ld(vdst, a0, offsetof(jit_conv_kernel_args_t, inter2));
-
-  if(M>15){
-  for ( j = 0; j < N; ) {
-      gvl = __builtin_epi_vsetvl(N-j, __epi_e32, __epi_m1); 
-     for (i = 0; i < M-15; i += 16) {                        
-        __epi_2xf32 vb,vb1,vb2,vb3,vc, vc1, vc2, vc3, vc4, vc5, vc6, vc7, vc8, vc9, vc10, vc11, vc12, vc13, vc14, vc15,vc16,vc17,vc18,vc19,vc20,vc21,vc22,vc23;
-        
-        vc= __builtin_epi_vload_2xf32(&C[i*ldc+j], gvl);
-        vc1= __builtin_epi_vload_2xf32(&C[(i+1)*ldc+j], gvl);
-        vc2= __builtin_epi_vload_2xf32(&C[(i+2)*ldc+j], gvl);
-        vc3= __builtin_epi_vload_2xf32(&C[(i+3)*ldc+j], gvl);
-        vc4= __builtin_epi_vload_2xf32(&C[(i+4)*ldc+j], gvl);
-        vc5= __builtin_epi_vload_2xf32(&C[(i+5)*ldc+j], gvl);
-        vc6= __builtin_epi_vload_2xf32(&C[(i+6)*ldc+j], gvl);
-        vc7= __builtin_epi_vload_2xf32(&C[(i+7)*ldc+j], gvl);
-        vc8= __builtin_epi_vload_2xf32(&C[(i+8)*ldc+j], gvl);
-        vc9= __builtin_epi_vload_2xf32(&C[(i+9)*ldc+j], gvl);
-        vc10= __builtin_epi_vload_2xf32(&C[(i+10)*ldc+j], gvl);
-        vc11= __builtin_epi_vload_2xf32(&C[(i+11)*ldc+j], gvl);
-        vc12= __builtin_epi_vload_2xf32(&C[(i+12)*ldc+j], gvl);
-        vc13= __builtin_epi_vload_2xf32(&C[(i+13)*ldc+j], gvl);
-        vc14= __builtin_epi_vload_2xf32(&C[(i+14)*ldc+j], gvl);
-        vc15= __builtin_epi_vload_2xf32(&C[(i+15)*ldc+j], gvl);
-	//
-        for ( k = 0; k < K-3; k +=4) {
-                vb = __builtin_epi_vload_2xf32(&B[k*ldb+j], gvl);
-                vb1 = __builtin_epi_vload_2xf32(&B[(k+1)*ldb+j], gvl);
-                vb2 = __builtin_epi_vload_2xf32(&B[(k+2)*ldb+j], gvl);
-                vb3 = __builtin_epi_vload_2xf32(&B[(k+3)*ldb+j], gvl);
-
-
-               __epi_2xf32 vaalpha = __builtin_epi_vfmv_v_f_2xf32(A[i*lda+k], gvl); // ALPHA*A
-                  vc = __builtin_epi_vfmacc_2xf32(vc, vaalpha, vb, gvl); // sum += ALPHA*A*B
-                
-               __epi_2xf32 vaalpha0 = __builtin_epi_vfmv_v_f_2xf32(A[i*lda+(k+1)], gvl); // ALPHA*A
-                  vc = __builtin_epi_vfmacc_2xf32(vc, vaalpha0, vb1, gvl); // sum += ALPHA*A*B
-
-               __epi_2xf32 vaalpha1 = __builtin_epi_vfmv_v_f_2xf32(A[(i+1)*lda+k], gvl); // ALPHA*A
-                  vc1 = __builtin_epi_vfmacc_2xf32(vc1, vaalpha1, vb, gvl); // sum += ALPHA*A*B
-               
-		__epi_2xf32 vaalpha01 = __builtin_epi_vfmv_v_f_2xf32(A[(i+1)*lda+(k+1)], gvl); // ALPHA*A
-                  vc1 = __builtin_epi_vfmacc_2xf32(vc1, vaalpha01, vb1, gvl); // sum += ALPHA*A*B
-                
-               __epi_2xf32 vaalpha2 = __builtin_epi_vfmv_v_f_2xf32(A[(i+2)*lda+k], gvl); // ALPHA*A
-                  vc2 = __builtin_epi_vfmacc_2xf32(vc2, vaalpha2, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha02 = __builtin_epi_vfmv_v_f_2xf32(A[(i+2)*lda+(k+1)], gvl); // ALPHA*A
-                  vc2 = __builtin_epi_vfmacc_2xf32(vc2, vaalpha02, vb1, gvl); // sum += ALPHA*A*B
-                
-
-               __epi_2xf32 vaalpha3 = __builtin_epi_vfmv_v_f_2xf32(A[(i+3)*lda+k], gvl); // ALPHA*A
-                  vc3 = __builtin_epi_vfmacc_2xf32(vc3, vaalpha3, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha03 = __builtin_epi_vfmv_v_f_2xf32(A[(i+3)*lda+(k+1)], gvl); // ALPHA*A
-                  vc3 = __builtin_epi_vfmacc_2xf32(vc3, vaalpha03, vb1, gvl); // sum += ALPHA*A*B
-                
-               __epi_2xf32 vaalpha4 = __builtin_epi_vfmv_v_f_2xf32(A[(i+4)*lda+k], gvl); // ALPHA*A
-                  vc4 = __builtin_epi_vfmacc_2xf32(vc4, vaalpha4, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha04 = __builtin_epi_vfmv_v_f_2xf32(A[(i+4)*lda+(k+1)], gvl); // ALPHA*A
-                  vc4 = __builtin_epi_vfmacc_2xf32(vc4, vaalpha04, vb1, gvl); // sum += ALPHA*A*B
-                
-               __epi_2xf32 vaalpha5 = __builtin_epi_vfmv_v_f_2xf32(A[(i+5)*lda+k], gvl); // ALPHA*A
-                  vc5 = __builtin_epi_vfmacc_2xf32(vc5, vaalpha5, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha05 = __builtin_epi_vfmv_v_f_2xf32( A[(i+5)*lda+(k+1)], gvl); // ALPHA*A
-                  vc5 = __builtin_epi_vfmacc_2xf32(vc5, vaalpha05, vb1, gvl); // sum += ALPHA*A*B
-                
-               __epi_2xf32 vaalpha6 = __builtin_epi_vfmv_v_f_2xf32(A[(i+6)*lda+k], gvl); // ALPHA*A
-                  vc6= __builtin_epi_vfmacc_2xf32(vc6, vaalpha6, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha06 = __builtin_epi_vfmv_v_f_2xf32(A[(i+6)*lda+(k+1)], gvl); // ALPHA*A
-                  vc6= __builtin_epi_vfmacc_2xf32(vc6, vaalpha06, vb1, gvl); // sum += ALPHA*A*B
-               
-               __epi_2xf32 vaalpha7 = __builtin_epi_vfmv_v_f_2xf32(A[(i+7)*lda+k], gvl); // ALPHA*A
-                  vc7 = __builtin_epi_vfmacc_2xf32(vc7, vaalpha7, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha07 = __builtin_epi_vfmv_v_f_2xf32(A[(i+7)*lda+(k+1)], gvl); // ALPHA*A
-                  vc7 = __builtin_epi_vfmacc_2xf32(vc7, vaalpha07, vb1, gvl); // sum += ALPHA*A*B
-               
-
-               __epi_2xf32 vaalpha8 = __builtin_epi_vfmv_v_f_2xf32(A[(i+8)*lda+k], gvl); // ALPHA*A
-                  vc8 = __builtin_epi_vfmacc_2xf32(vc8, vaalpha8, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha08 = __builtin_epi_vfmv_v_f_2xf32(A[(i+8)*lda+(k+1)], gvl); // ALPHA*A
-                  vc8 = __builtin_epi_vfmacc_2xf32(vc8, vaalpha08, vb1, gvl); // sum += ALPHA*A*B
-                
-
-               __epi_2xf32 vaalpha9= __builtin_epi_vfmv_v_f_2xf32(A[(i+9)*lda+k], gvl); // ALPHA*A
-                  vc9 = __builtin_epi_vfmacc_2xf32(vc9, vaalpha9, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha09= __builtin_epi_vfmv_v_f_2xf32(A[(i+9)*lda+(k+1)], gvl); // ALPHA*A
-                  vc9 = __builtin_epi_vfmacc_2xf32(vc9, vaalpha09, vb1, gvl); // sum += ALPHA*A*B
-                
-
-               __epi_2xf32 vaalpha10 = __builtin_epi_vfmv_v_f_2xf32(A[(i+10)*lda+k], gvl); // ALPHA*A
-                  vc10 = __builtin_epi_vfmacc_2xf32(vc10, vaalpha10, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha010 = __builtin_epi_vfmv_v_f_2xf32(A[(i+10)*lda+(k+1)], gvl); // ALPHA*A
-                  vc10 = __builtin_epi_vfmacc_2xf32(vc10, vaalpha010, vb1, gvl); // sum += ALPHA*A*B
-                
-               __epi_2xf32 vaalpha11 = __builtin_epi_vfmv_v_f_2xf32(A[(i+11)*lda+k], gvl); // ALPHA*A
-                  vc11 = __builtin_epi_vfmacc_2xf32(vc11, vaalpha11, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha011 = __builtin_epi_vfmv_v_f_2xf32(A[(i+11)*lda+(k+1)], gvl); // ALPHA*A
-                  vc11 = __builtin_epi_vfmacc_2xf32(vc11, vaalpha011, vb1, gvl); // sum += ALPHA*A*B
-                
-
-               __epi_2xf32 vaalpha12 = __builtin_epi_vfmv_v_f_2xf32(A[(i+12)*lda+k], gvl); // ALPHA*A
-                  vc12 = __builtin_epi_vfmacc_2xf32(vc12, vaalpha12, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha012 = __builtin_epi_vfmv_v_f_2xf32(A[(i+12)*lda+(k+1)], gvl); // ALPHA*A
-                  vc12 = __builtin_epi_vfmacc_2xf32(vc12, vaalpha012, vb1, gvl); // sum += ALPHA*A*B
-                
-
-               __epi_2xf32 vaalpha13 = __builtin_epi_vfmv_v_f_2xf32(A[(i+13)*lda+k], gvl); // ALPHA*A
-                  vc13 = __builtin_epi_vfmacc_2xf32(vc13, vaalpha13, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha013 = __builtin_epi_vfmv_v_f_2xf32(A[(i+13)*lda+(k+1)], gvl); // ALPHA*A
-                  vc13 = __builtin_epi_vfmacc_2xf32(vc13, vaalpha013, vb1, gvl); // sum += ALPHA*A*B
-                
-
-               __epi_2xf32 vaalpha14 = __builtin_epi_vfmv_v_f_2xf32(A[(i+14)*lda+k], gvl); // ALPHA*A
-                  vc14 = __builtin_epi_vfmacc_2xf32(vc14, vaalpha14, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha014 = __builtin_epi_vfmv_v_f_2xf32(A[(i+14)*lda+(k+1)], gvl); // ALPHA*A
-                  vc14 = __builtin_epi_vfmacc_2xf32(vc14, vaalpha014, vb1, gvl); // sum += ALPHA*A*B
-                
-
-               __epi_2xf32 vaalpha15 = __builtin_epi_vfmv_v_f_2xf32(A[(i+15)*lda+k], gvl); // ALPHA*A
-                  vc15 = __builtin_epi_vfmacc_2xf32(vc15, vaalpha15, vb, gvl); // sum += ALPHA*A*B
-	
-               __epi_2xf32 vaalpha015 = __builtin_epi_vfmv_v_f_2xf32(A[(i+15)*lda+(k+1)], gvl); // ALPHA*A
-                  vc15 = __builtin_epi_vfmacc_2xf32(vc15, vaalpha015, vb1, gvl); // sum += ALPHA*A*B
-
-		/* unroll 4*/
-/*
-                vaalpha = __builtin_epi_vfmv_v_f_2xf32(A[i*lda+(k+2)], gvl); // ALPHA*A
-                  vc = __builtin_epi_vfmacc_2xf32(vc, vaalpha, vb2, gvl); // sum += ALPHA*A*B
-                
-                vaalpha0 = __builtin_epi_vfmv_v_f_2xf32(A[i*lda+(k+3)], gvl); // ALPHA*A
-                  vc = __builtin_epi_vfmacc_2xf32(vc, vaalpha0, vb3, gvl); // sum += ALPHA*A*B
-
-               vaalpha1 = __builtin_epi_vfmv_v_f_2xf32(A[(i+1)*lda+(k+2)], gvl); // ALPHA*A
-                  vc1 = __builtin_epi_vfmacc_2xf32(vc1, vaalpha1, vb2, gvl); // sum += ALPHA*A*B
-               
-               vaalpha01 = __builtin_epi_vfmv_v_f_2xf32(A[(i+1)*lda+(k+3)], gvl); // ALPHA*A
-                  vc1 = __builtin_epi_vfmacc_2xf32(vc1, vaalpha01, vb3, gvl); // sum += ALPHA*A*B
-                
-               vaalpha2 = __builtin_epi_vfmv_v_f_2xf32(A[(i+2)*lda+(k+2)], gvl); // ALPHA*A
-                  vc2 = __builtin_epi_vfmacc_2xf32(vc2, vaalpha2, vb2, gvl); // sum += ALPHA*A*B
-	
-                vaalpha02 = __builtin_epi_vfmv_v_f_2xf32(A[(i+2)*lda+(k+3)], gvl); // ALPHA*A
-                  vc2 = __builtin_epi_vfmacc_2xf32(vc2, vaalpha02, vb3, gvl); // sum += ALPHA*A*B
-                
-
-                vaalpha3 = __builtin_epi_vfmv_v_f_2xf32(A[(i+3)*lda+(k+2)], gvl); // ALPHA*A
-                  vc3 = __builtin_epi_vfmacc_2xf32(vc3, vaalpha3, vb2, gvl); // sum += ALPHA*A*B
-		
-                vaalpha03 = __builtin_epi_vfmv_v_f_2xf32(A[(i+3)*lda+(k+3)], gvl); // ALPHA*A
-                  vc3 = __builtin_epi_vfmacc_2xf32(vc3, vaalpha03, vb3, gvl); // sum += ALPHA*A*B
-                
-               vaalpha4 = __builtin_epi_vfmv_v_f_2xf32( A[(i+4)*lda+(k+2)], gvl); // ALPHA*A
-                  vc4 = __builtin_epi_vfmacc_2xf32(vc4, vaalpha4, vb2, gvl); // sum += ALPHA*A*B
-	
-               vaalpha04 = __builtin_epi_vfmv_v_f_2xf32(A[(i+4)*lda+(k+3)], gvl); // ALPHA*A
-                  vc4 = __builtin_epi_vfmacc_2xf32(vc4, vaalpha04, vb3, gvl); // sum += ALPHA*A*B
-                
-                vaalpha5 = __builtin_epi_vfmv_v_f_2xf32(A[(i+5)*lda+(k+2)], gvl); // ALPHA*A
-                  vc5 = __builtin_epi_vfmacc_2xf32(vc5, vaalpha5, vb2, gvl); // sum += ALPHA*A*B
-               
-		vaalpha05 = __builtin_epi_vfmv_v_f_2xf32(A[(i+5)*lda+(k+3)], gvl); // ALPHA*A
-                  vc5 = __builtin_epi_vfmacc_2xf32(vc5, vaalpha05, vb3, gvl); // sum += ALPHA*A*B
-                
-                vaalpha6 = __builtin_epi_vfmv_v_f_2xf32(A[(i+6)*lda+(k+2)], gvl); // ALPHA*A
-                  vc6= __builtin_epi_vfmacc_2xf32(vc6, vaalpha6, vb2, gvl); // sum += ALPHA*A*B
-                 
-		vaalpha06 = __builtin_epi_vfmv_v_f_2xf32(A[(i+6)*lda+(k+3)], gvl); // ALPHA*A
-                  vc6= __builtin_epi_vfmacc_2xf32(vc6, vaalpha06, vb3, gvl); // sum += ALPHA*A*B
-               
-                 vaalpha7 = __builtin_epi_vfmv_v_f_2xf32(A[(i+7)*lda+(k+2)], gvl); // ALPHA*A
-                  vc7 = __builtin_epi_vfmacc_2xf32(vc7, vaalpha7, vb2, gvl); // sum += ALPHA*A*B
-		 
-                  vaalpha07 = __builtin_epi_vfmv_v_f_2xf32(A[(i+7)*lda+(k+3)], gvl); // ALPHA*A
-                  vc7 = __builtin_epi_vfmacc_2xf32(vc7, vaalpha07, vb3, gvl); // sum += ALPHA*A*B
-               
-
-                  vaalpha8 = __builtin_epi_vfmv_v_f_2xf32(A[(i+8)*lda+(k+2)], gvl); // ALPHA*A
-                  vc8 = __builtin_epi_vfmacc_2xf32(vc8, vaalpha8, vb2, gvl); // sum += ALPHA*A*B
-		  
-                  vaalpha08 = __builtin_epi_vfmv_v_f_2xf32(A[(i+8)*lda+(k+3)], gvl); // ALPHA*A
-                  vc8 = __builtin_epi_vfmacc_2xf32(vc8, vaalpha08, vb3, gvl); // sum += ALPHA*A*B
-                
-
-                   vaalpha9= __builtin_epi_vfmv_v_f_2xf32(A[(i+9)*lda+(k+2)], gvl); // ALPHA*A
-                  vc9 = __builtin_epi_vfmacc_2xf32(vc9, vaalpha9, vb2, gvl); // sum += ALPHA*A*B
-		  
-               	 vaalpha09= __builtin_epi_vfmv_v_f_2xf32(A[(i+9)*lda+(k+3)], gvl); // ALPHA*A
-                  vc9 = __builtin_epi_vfmacc_2xf32(vc9, vaalpha09, vb3, gvl); // sum += ALPHA*A*B
-                
-
-                 vaalpha10 = __builtin_epi_vfmv_v_f_2xf32(A[(i+10)*lda+(k+2)], gvl); // ALPHA*A
-                   vc10 = __builtin_epi_vfmacc_2xf32(vc10, vaalpha10, vb2, gvl); // sum += ALPHA*A*B
-		 
-                 vaalpha010 = __builtin_epi_vfmv_v_f_2xf32(A[(i+10)*lda+(k+3)], gvl); // ALPHA*A
-                  vc10 = __builtin_epi_vfmacc_2xf32(vc10, vaalpha010, vb3, gvl); // sum += ALPHA*A*B
-                
-                vaalpha11 = __builtin_epi_vfmv_v_f_2xf32(A[(i+11)*lda+(k+2)], gvl); // ALPHA*A
-                  vc11 = __builtin_epi_vfmacc_2xf32(vc11, vaalpha11, vb2, gvl); // sum += ALPHA*A*B
-		 
-                 vaalpha011 = __builtin_epi_vfmv_v_f_2xf32(A[(i+11)*lda+(k+3)], gvl); // ALPHA*A
-                  vc11 = __builtin_epi_vfmacc_2xf32(vc11, vaalpha011, vb3, gvl); // sum += ALPHA*A*B
-                
-
-                vaalpha12 = __builtin_epi_vfmv_v_f_2xf32(A[(i+12)*lda+(k+2)], gvl); // ALPHA*A
-                  vc12 = __builtin_epi_vfmacc_2xf32(vc12, vaalpha12, vb2, gvl); // sum += ALPHA*A*B
-		
-                vaalpha012 = __builtin_epi_vfmv_v_f_2xf32(A[(i+12)*lda+(k+3)], gvl); // ALPHA*A
-                  vc12 = __builtin_epi_vfmacc_2xf32(vc12, vaalpha012, vb3, gvl); // sum += ALPHA*A*B
-                
-
-                 vaalpha13 = __builtin_epi_vfmv_v_f_2xf32(A[(i+13)*lda+(k+2)], gvl); // ALPHA*A
-                  vc13 = __builtin_epi_vfmacc_2xf32(vc13, vaalpha13, vb2, gvl); // sum += ALPHA*A*B
-                 
-		vaalpha013 = __builtin_epi_vfmv_v_f_2xf32( A[(i+13)*lda+(k+3)], gvl); // ALPHA*A
-                  vc13 = __builtin_epi_vfmacc_2xf32(vc13, vaalpha013, vb3, gvl); // sum += ALPHA*A*B
-                
-
-                   vaalpha14 = __builtin_epi_vfmv_v_f_2xf32(A[(i+14)*lda+(k+2)], gvl); // ALPHA*A
-                  vc14 = __builtin_epi_vfmacc_2xf32(vc14, vaalpha14, vb2, gvl); // sum += ALPHA*A*B
-		  
-                 vaalpha014 = __builtin_epi_vfmv_v_f_2xf32(A[(i+14)*lda+(k+3)], gvl); // ALPHA*A
-                  vc14 = __builtin_epi_vfmacc_2xf32(vc14, vaalpha014, vb3, gvl); // sum += ALPHA*A*B
-                
-
-                   vaalpha15 = __builtin_epi_vfmv_v_f_2xf32(A[(i+15)*lda+(k+2)], gvl); // ALPHA*A
-                  vc15 = __builtin_epi_vfmacc_2xf32(vc15, vaalpha15, vb2, gvl); // sum += ALPHA*A*B
-		   
-                   vaalpha015 = __builtin_epi_vfmv_v_f_2xf32(A[(i+15)*lda+(k+3)], gvl); // ALPHA*A
-                  vc15 = __builtin_epi_vfmacc_2xf32(vc15, vaalpha015, vb3, gvl); // sum += ALPHA*A*B
-
-	}
-       for ( int k1 = k; k1 < K; k1 += 1) {
-		__epi_2xf32 vb = __builtin_epi_vload_2xf32(&B[k1*ldb+j], gvl);
-
-                register float alpha =  A[i*lda+k1];
-               __epi_2xf32 vaalpha = __builtin_epi_vfmv_v_f_2xf32(alpha, gvl); // ALPHA*A
-                  vc = __builtin_epi_vfmacc_2xf32(vc, vaalpha, vb, gvl); // sum += ALPHA*A*B
-                register float alpha1 =  A[(i+1)*lda+k1];
-               __epi_2xf32 vaalpha1 = __builtin_epi_vfmv_v_f_2xf32(alpha1, gvl); // ALPHA*A
-                  vc1 = __builtin_epi_vfmacc_2xf32(vc1, vaalpha1, vb, gvl); // sum += ALPHA*A*B
-                register float alpha2 =  A[(i+2)*lda+k1];
-               __epi_2xf32 vaalpha2 = __builtin_epi_vfmv_v_f_2xf32(alpha2, gvl); // ALPHA*A
-                  vc2 = __builtin_epi_vfmacc_2xf32(vc2, vaalpha2, vb, gvl); // sum += ALPHA*A*B
-                register float alpha3 =  A[(i+3)*lda+k1];
-               __epi_2xf32 vaalpha3 = __builtin_epi_vfmv_v_f_2xf32(alpha3, gvl); // ALPHA*A
-                  vc3 = __builtin_epi_vfmacc_2xf32(vc3, vaalpha3, vb, gvl); // sum += ALPHA*A*B
-                register float alpha4 =  A[(i+4)*lda+k1];
-               __epi_2xf32 vaalpha4 = __builtin_epi_vfmv_v_f_2xf32(alpha4, gvl); // ALPHA*A
-                  vc4 = __builtin_epi_vfmacc_2xf32(vc4, vaalpha4, vb, gvl); // sum += ALPHA*A*B
-                register float alpha5 =  A[(i+5)*lda+k1];
-               __epi_2xf32 vaalpha5 = __builtin_epi_vfmv_v_f_2xf32(alpha5, gvl); // ALPHA*A
-                  vc5 = __builtin_epi_vfmacc_2xf32(vc5, vaalpha5, vb, gvl); // sum += ALPHA*A*B
-                register float alpha6 =  A[(i+6)*lda+k1];
-               __epi_2xf32 vaalpha6 = __builtin_epi_vfmv_v_f_2xf32(alpha6, gvl); // ALPHA*A
-                  vc6= __builtin_epi_vfmacc_2xf32(vc6, vaalpha6, vb, gvl); // sum += ALPHA*A*B
-                register float alpha7 =  A[(i+7)*lda+k1];
-               __epi_2xf32 vaalpha7 = __builtin_epi_vfmv_v_f_2xf32(alpha7, gvl); // ALPHA*A
-                  vc7 = __builtin_epi_vfmacc_2xf32(vc7, vaalpha7, vb, gvl); // sum += ALPHA*A*B
-                register float alpha8 =  A[(i+8)*lda+k1];
-               __epi_2xf32 vaalpha8 = __builtin_epi_vfmv_v_f_2xf32(alpha8, gvl); // ALPHA*A
-                  vc8 = __builtin_epi_vfmacc_2xf32(vc8, vaalpha8, vb, gvl); // sum += ALPHA*A*B
-                register float alpha9 =  A[(i+9)*lda+k1];
-               __epi_2xf32 vaalpha9= __builtin_epi_vfmv_v_f_2xf32(alpha9, gvl); // ALPHA*A
-                  vc9 = __builtin_epi_vfmacc_2xf32(vc9, vaalpha9, vb, gvl); // sum += ALPHA*A*B
-                register float alpha10 =  A[(i+10)*lda+k1];
-               __epi_2xf32 vaalpha10 = __builtin_epi_vfmv_v_f_2xf32(alpha10, gvl); // ALPHA*A
-                  vc10 = __builtin_epi_vfmacc_2xf32(vc10, vaalpha10, vb, gvl); // sum += ALPHA*A*B
-		register float alpha11 =  A[(i+11)*lda+k1];
-               __epi_2xf32 vaalpha11 = __builtin_epi_vfmv_v_f_2xf32(alpha11, gvl); // ALPHA*A
-                  vc11 = __builtin_epi_vfmacc_2xf32(vc11, vaalpha11, vb, gvl); // sum += ALPHA*A*B
-                register float alpha12 =  A[(i+12)*lda+k1];
-               __epi_2xf32 vaalpha12 = __builtin_epi_vfmv_v_f_2xf32(alpha12, gvl); // ALPHA*A
-                  vc12 = __builtin_epi_vfmacc_2xf32(vc12, vaalpha12, vb, gvl); // sum += ALPHA*A*B
-                register float alpha13 =  A[(i+13)*lda+k1];
-               __epi_2xf32 vaalpha13 = __builtin_epi_vfmv_v_f_2xf32(alpha13, gvl); // ALPHA*A
-                  vc13 = __builtin_epi_vfmacc_2xf32(vc13, vaalpha13, vb, gvl); // sum += ALPHA*A*B
-                register float alpha14 =  A[(i+14)*lda+k1];
-               __epi_2xf32 vaalpha14 = __builtin_epi_vfmv_v_f_2xf32(alpha14, gvl); // ALPHA*A
-                  vc14 = __builtin_epi_vfmacc_2xf32(vc14, vaalpha14, vb, gvl); // sum += ALPHA*A*B
-                register float alpha15 =  A[(i+15)*lda+k1];
-               __epi_2xf32 vaalpha15 = __builtin_epi_vfmv_v_f_2xf32(alpha15, gvl); // ALPHA*A
-                  vc15 = __builtin_epi_vfmacc_2xf32(vc15, vaalpha15, vb, gvl); // sum += ALPHA*A*B
-
-	}
-	
-                __builtin_epi_vstore_2xf32(&C[i*ldc+j], vc, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+1)*ldc+j], vc1, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+2)*ldc+j], vc2, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+3)*ldc+j], vc3, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+4)*ldc+j], vc4, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+5)*ldc+j], vc5, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+6)*ldc+j], vc6, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+7)*ldc+j], vc7, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+8)*ldc+j], vc8, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+9)*ldc+j], vc9, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+10)*ldc+j], vc10, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+11)*ldc+j], vc11, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+12)*ldc+j], vc12, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+13)*ldc+j], vc13, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+14)*ldc+j], vc14, gvl);
-                __builtin_epi_vstore_2xf32(&C[(i+15)*ldc+j], vc15, gvl);
-		//
-        }
-    j += gvl;
-    }}*/
-/*
-  int i_left=i;
-  for (int j = 0; j < N; ) {
-     __epi_2xf32  vaalpha, vaalpha1, vaalpha2, vaalpha3, vc, vc1, vc2, vc3,vb;
-     float alpha1, alpha2, alpha3, alpha;
-   
-     unsigned long int gvl = __builtin_epi_vsetvl(N-j, __epi_e32, __epi_m1);
-     for (i=i_left; i < M; i += 4) {    // change according to unroll degree 
-        vc= __builtin_epi_vload_2xf32(&C[i*ldc+j], gvl);
-       if (i+1 < M) { vc1= __builtin_epi_vload_2xf32(&C[(i+1)*ldc+j], gvl);}
-       if (i+2 < M) { vc2= __builtin_epi_vload_2xf32(&C[(i+2)*ldc+j], gvl);}
-       if (i+3 < M) {vc3= __builtin_epi_vload_2xf32(&C[(i+3)*ldc+j], gvl);}
-
-        for (int k = 0; k < K; k ++) {
-                vaalpha = __builtin_epi_vfmv_v_f_2xf32(A[i*lda+k], gvl); // ALPHA*A
-               if (i+1 < M) { vaalpha1 = __builtin_epi_vfmv_v_f_2xf32(A[(i+1)*lda+k], gvl);} // ALPHA*A
-               if (i+2 < M) { vaalpha2 = __builtin_epi_vfmv_v_f_2xf32( A[(i+2)*lda+k], gvl);} // ALPHA*A
-               if (i+3 < M) { vaalpha3 = __builtin_epi_vfmv_v_f_2xf32(A[(i+3)*lda+k], gvl);} // ALPHA*A
-                vb = __builtin_epi_vload_2xf32(&B[k*ldb+j], gvl);
-                  vc = __builtin_epi_vfmacc_2xf32(vc, vaalpha, vb, gvl); // sum += ALPHA*A*B
-                  if (i+1 < M) {vc1 = __builtin_epi_vfmacc_2xf32(vc1, vaalpha1, vb, gvl);} // sum += ALPHA*A*B
-                  if (i+2 < M) {vc2 = __builtin_epi_vfmacc_2xf32(vc2, vaalpha2, vb, gvl);} // sum += ALPHA*A*B
-                  if (i+3 < M) {vc3 = __builtin_epi_vfmacc_2xf32(vc3, vaalpha3, vb, gvl);}// sum += ALPHA*A*B
-        }
-          __builtin_epi_vstore_2xf32(&C[i*ldc+j], vc, gvl);
-          if (i+1 < M)      {__builtin_epi_vstore_2xf32(&C[(i+1)*ldc+j], vc1, gvl);}
-          if (i+2 < M)      {__builtin_epi_vstore_2xf32(&C[(i+2)*ldc+j], vc2, gvl);}
-          if (i+3 < M)      {__builtin_epi_vstore_2xf32(&C[(i+3)*ldc+j], vc3, gvl);}
-     }
-     j += gvl;
-  }*/
-//}
-
-void jit_convolution_kernel_t::gemm_nn_original(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int M, int N, int K, float ALPHA, int lda,int ldb, int ldc){
-    // Registers to serve as pointers to the arguments
-    const gpr_t vsrc = tmp.pick(); // A address
-    const gpr_t vwei = tmp.pick(); // B address
-    const gpr_t vdst = tmp.pick(); // C address
-
-    // Loading the addresses of the arguments
-    rvjit::assembler::ld(vsrc, a0, offsetof(jit_conv_kernel_args_t, inter));
-    rvjit::assembler::ld(vwei, a0, offsetof(jit_conv_kernel_args_t, wei));
-    rvjit::assembler::ld(vdst, a0, offsetof(jit_conv_kernel_args_t, inter2));
+    addi(vsrc, vsrc, A_offset);
+    addi(vwei, vwei, B_offset);
+    addi(vdst, vdst, C_offset);
 
     const int src_sew = types::data_type_size(cfg.src_dt);
     const gpr_t sew = tmp.pick();
     load_constant(sew, src_sew);
-    const gpr_t vlen = tmp.pick();
-    const gpr_t ld_reg = tmp.pick();
-
-    const gpr_t i_reg = tmp.pick();
+    // Loop over the blocks of the result matrix C
+    const gpr_t i = tmp.pick();
     const gpr_t i_end = tmp.pick();
-    load_constant(i_reg, 0);
+    load_constant(i, 0);
     load_constant(i_end, M);
-    L("i");
+    char labeli[16];
+    snprintf(labeli, 16, "l%d", label_counter++);
+    L(labeli);
     //for(i = 0; i < M; ++i){
-        const gpr_t k_reg = tmp.pick();
+        const gpr_t k = tmp.pick();
         const gpr_t k_end = tmp.pick();
-        load_constant(k_reg, 0);
+        load_constant(k, 0);
         load_constant(k_end, K);
-        L("k");
+        char labelk[16];
+        snprintf(labelk, 16, "l%d", label_counter++);
+        L(labelk);
+
         //for(k = 0; k < K; ++k){
-            const fpr_t A_PART = ft1;
-            const gpr_t A_index = tmp.pick();
-            const fpr_t ALPHA_reg = ft2;
-            
-            load_constant(ld_reg, lda);
-            addi(A_index, ld_reg, 0);
-            mul(A_index, A_index, i_reg);
-            add(A_index, A_index, k_reg);
-            mul(A_index, A_index, sew);
-            add(A_index, A_index, vsrc);
+            const fpr_t alpha = ft0;
+            const fpr_t A_part = ft1;
+            const gpr_t float_address = tmp.pick();
+            load_constant(float_address, reinterpret_cast<intptr_t>(ALPHA_ptr));
+            flw(alpha, float_address, 0);
+            const gpr_t a_index = tmp.pick();
+            load_constant(a_index, lda);
+            mul(a_index, a_index, i);
+            add(a_index, a_index, k);
+            add(a_index, a_index, vsrc);
+            flw(A_part, a_index, 0);
+            fmul_s(A_part, A_part, alpha, rm_t::rvj_rne);
 
-            flw(A_PART, A_index, 0);
-            
-            //register float A_PART = ALPHA*A[i*lda+k];
-            const gpr_t j_reg = tmp.pick();
+            const gpr_t j = tmp.pick();
             const gpr_t j_end = tmp.pick();
-            load_constant(j_reg, 0);
+            load_constant(j, 0);
             load_constant(j_end, N);
-            L("j");
+            char labelj[16];
+            snprintf(labelj, 16, "l%d", label_counter++);
+            L(labelj);
             //for(j = 0; j < N; ++j){
-                const gpr_t B_index = tmp.pick();
-                const fpr_t B_PART = ft3;
-                const gpr_t C_index = tmp.pick();
-                
-                load_constant(ld_reg, lda);
-                addi(B_index, ld_reg, 0);
-                mul(B_index, B_index, j_reg);
-                add(B_index, B_index, k_reg);
-                //mul(B_index, B_index, sew);
-                add(B_index, B_index, vwei);
-                
-                flw(B_PART, B_index, 0);
-                
-                const fpr_t C_PART = ft4;
-                load_constant(ld_reg, ldc);
-                addi(C_index, ld_reg, 0);
-                mul(C_index, C_index, i_reg);
-                add(C_index, C_index, j_reg);
-                mul(C_index, C_index, sew);
-                add(C_index, C_index, vdst);
-                flw(C_PART, C_index, 0);
-                fmul_s(B_PART, B_PART, A_PART, rounding_mode::rne);
-                fadd_s(C_PART, B_PART, C_PART, rounding_mode::rne);
-                fsw(C_index, C_PART, 0);
-                
-                //C[i*ldc+j] += A_PART*B[k*ldb+j];
-            // j loop
-            addi(j_reg, j_reg, 1);
-            bne(j_reg, j_end, "j");
-            
+                const gpr_t b_index = tmp.pick();
+                const fpr_t B_part = ft2;
+                load_constant(b_index, ldb);
+                mul(b_index, b_index, k);
+                add(b_index, b_index, j);
+                add(b_index, b_index, vwei);
+                flw(B_part, b_index, 0);
+                fmul_s(B_part, B_part, A_part, rm_t::rvj_rne);
 
-        // k loop
-        addi(k_reg, k_reg, 1);
-        bne(k_reg, k_end, "k");
+                const gpr_t c_index = tmp.pick();
+                load_constant(c_index, ldc);
+                mul(c_index, c_index, i);
+                add(c_index, c_index, j);
+                add(c_index, c_index, vdst);
+
+                const fpr_t C_part = ft3;
+                flw(C_part, c_index, 0);
+                fadd_s(C_part, C_part, B_part, rm_t::rvj_rne);
+                fsw(c_index, C_part, 0);
+                //C[i*ldc+j] += A_PART*B[k*ldb+j];
+
+            addi(j, j, 1);
+            blt(j, j_end, labelj);
+
+        addi(k, k, 1);
+        blt(k, k_end, labelk);
     
-    // i loop
-    addi(i_reg, i_reg, 1);
-    bne(i_reg, i_end, "i");
+    addi(i, i, 1);
+    blt(i, i_end, labeli);
+
 }
 
-void jit_convolution_kernel_t::gemm_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,
+void jit_convolution_kernel_t::blocked_gemm(convolution_schedule_t::jit_conv_kernel_args_t kargs,
+    rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int M, int N, int K, float ALPHA,
+        int lda, int ldb, int ldc, int block_size_M, int block_size_N, int block_size_K)
+{
+ 
+    int current_block_size_N = block_size_N;
+    int current_block_size_K = block_size_K;
+    int current_block_size_M = block_size_M;
+   
+    for (int jj = 0; jj < N; jj += current_block_size_N) {
+    current_block_size_N = std::min(block_size_N, N - jj);
+    for (int kk = 0; kk < K; kk += current_block_size_K) {
+        current_block_size_K = std::min(block_size_K, K - kk);
+        for (int ii = 0; ii < M; ii += current_block_size_M) {
+            current_block_size_M = std::min(block_size_M, M - ii);
+            // Compute offsets for A, B, and C matrices
+            int A_offset = ii * lda + kk;   // Offset into A matrix
+            int B_offset = kk * ldb + jj;   // Offset into B matrix
+            int C_offset = ii * ldc + jj;   // Offset into C matrix
+            //std::cout << "A_offset: " << A_offset << " B_offset: " << B_offset << " C_offset: " << C_offset << std::endl;
+            // Call the core GEMM for the current block
+            gemm_nn_noalpha_unroll163loops(vout, nvregs, tmp,
+                current_block_size_M, current_block_size_N, current_block_size_K, ALPHA,
+                A_offset*4, lda,
+                B_offset*4, ldb,
+                C_offset*4, ldc,
+                16
+            );
+            
+        }
+    }
+}
+
+}
+void jit_convolution_kernel_t::gemm_cpu(convolution_schedule_t::jit_conv_kernel_args_t kargs, rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,
         int TA, int TB, int M, int N, int K, float ALPHA, int lda, int ldb, float BETA, int ldc)
 {
+    int config[5] = {1,1,1,1,1};
     if(!TA && !TB)
     {
-    /*
-	    // enable below for the 6-loops packed implementations 
-        int blockM = std::min(16*2, M);
-        int blockN = std::min(512*2, N);
-        int blockK = std::min(128*2, K);
-
-        // Using new to allocate memory
-        float* transposeB = new (std::nothrow) float[blockM * blockN * blockK];
-        float* transposeA = new (std::nothrow) float[blockM * blockN * blockK];
-
-        if (!transposeB) {
-            std::cerr << "Fatal: failed to allocate bytes for transposeB.\n";
-            exit(EXIT_FAILURE); // Prefer EXIT_FAILURE or EXIT_SUCCESS
+        
+        if(N == 50176){
+            blocked_gemm(kargs, vout, nvregs, tmp, M, N, K, ALPHA, lda, ldb, ldc, M, 
+            N/config[0], K);
         }
+        else if(N == 12544){
+            blocked_gemm(kargs, vout, nvregs, tmp, M, N, K, ALPHA, lda, ldb, ldc, M, 
+            N/config[1], K);
 
-        if (!transposeA) {
-            std::cerr << "Fatal: failed to allocate bytes for transposeA.\n";
-            exit(EXIT_FAILURE);
         }
-        //size_t transposeB_ = reinterpret_cast<size_t>(transposeB);
-        //size_t transposeA_ = reinterpret_cast<size_t>(transposeA);
-        //gemm_nn_original(M,N,K,ALPHA,A, lda,B, ldb, C, ldc);	
-        gemm_nn_pack2(vout, nvregs, tmp, M, N, K, ALPHA, lda, ldb, ldc, blockM, blockN, blockK, transposeB, transposeA);
-        delete[] transposeB;
-        transposeB = nullptr; // Using nullptr
+        else if(N == 3136){
+            blocked_gemm(kargs, vout, nvregs, tmp, M, N, K, ALPHA, lda, ldb, ldc, M, 
+            N/config[2], K);
+        }
+        else if(N == 784){
+            blocked_gemm(kargs, vout, nvregs, tmp, M, N, K, ALPHA, lda, ldb, ldc, M,
+            N/config[3], K);
+        }
+        else if(N == 196){
+            blocked_gemm(kargs, vout, nvregs, tmp, M, N, K, ALPHA, lda, ldb, ldc, M, 
+            N/config[4], K);
+        }
+        else
+        {
+            gemm_nn_noalpha_unroll163loops(vout, nvregs, tmp, M, N, K, ALPHA, 0, lda, 0, ldb, 0, ldc, 0);
+        }
+        /*for(int i = 0; i < 10; i++){
+            blocked_gemm(kargs, vout, nvregs, tmp, M, N, K, ALPHA, lda, ldb, ldc, M, N, K);
+        }*/
+        //blocked_gemm(kargs, vout, nvregs, tmp, M, N, K, ALPHA, lda, ldb, ldc, 64, 64, 64);
 
-        delete[] transposeA;
-        transposeA = nullptr; // Using nullptr
-    */
-    /*** 3-loop implementation */
-	    gemm_nn_noalpha_unroll163loops(vout, nvregs, tmp, M, N, K, ALPHA,lda, ldb,ldc);
-        //gemm_nn_original(vout, nvregs, tmp, M, N, K, ALPHA, lda, ldb, ldc);
+        //gemm_nn_noalpha_unroll163loops(vout, nvregs, tmp, M, N, K, ALPHA, 0, lda, 0, ldb, 0, ldc, 16);
+        
     }/*
     else if(TA && !TB)
         gemm_tn(M, N, K, ALPHA,A,lda, B, ldb,C,ldc);
@@ -1820,7 +3715,7 @@ void jit_convolution_kernel_t::col2im_cpu(rvjit::vr_t *vout, int nvregs, registe
     const int height_col = (height + 2 * pad - ksize) / stride + 1;
     const int width_col = (width + 2 * pad - ksize) / stride + 1;
     const int channels_col = channels * ksize * ksize;
-
+    tmp.reset();
     const gpr_t vsrc = tmp.pick(); // Holds base address of src/col
     const gpr_t vdst = tmp.pick(); // Holds base address of dst/im
     rvjit::assembler::ld(vsrc, a0, offsetof(jit_conv_kernel_args_t, inter2));
@@ -1937,27 +3832,35 @@ void jit_convolution_kernel_t::code(convolution_schedule_t::jit_conv_kernel_args
     const int l_pad = cfg.l_pad; // left padding
     const int t_pad = cfg.t_pad; // top padding
     const int vlen = cfg.vlen; // vector length
-    const int nvregs = traits.erbw * traits.erbc;
+    //const int nvregs = traits.erbw * traits.erbc;
+    const int nvregs = 32;
     const size_t wei_sew = types::data_type_size(cfg.wei_dt);
     const size_t bia_sew = cfg.with_bias ? types::data_type_size(cfg.bias_dt) : 0;
     const size_t src_sew = types::data_type_size(cfg.src_dt);
     const size_t dst_sew = types::data_type_size(cfg.dst_dt);
 
-    int M = oc; // Number of output channels
-    int N = oh * ow; // Output spatial dimensions (flattened)
-    int K = ic * kh * kw; // Dimension shared by A and B
+    int M = oc;                   // Number of output channels
+    int N = oh * ow;              // Total number of spatial positions in the output
+    int K = ic * kh * kw;         // Total number of elements in a single filter
+    int lda = 3 * 3 * ic;         // Elements per column in matrix A after im2col
+    int ldb = 3 * 3 * ic;         // Elements per row in matrix B (filter)
+    int ldc = oh * ow;            // Spatial dimensions of the output feature map
 
     /// Output register block
     vr_t vout[32];
     for (int i = 0; i < nvregs; ++i)
         vout[i] = static_cast<vr_t>(i);
+
+    int size = kh * kw * ic * oh * ow;
+
+    // Allocate memory for the intermediate data
+    // Using float col[size]; does not work due to stack size limitations
+    // Using float* col = new float[size]; does work since it uses the heap  
+    
     /// Pool of available caller-saved general purpose registers
     register_pool_t tmp_pool({t0,t1,t2,t3,t4,t5,t6,a7,a6,a5,a4,a3,a2,a1,s0,s1,s2,s3,s4,s5,s6,s7,s8,s9,s10,s11});
-    tmp_pool.reset();
     im2col_cpu(vout, nvregs, tmp_pool, ic, ih, iw, kh, stride_h, l_pad);
-    tmp_pool.reset();
-    gemm_cpu(vout, nvregs, tmp_pool, 0, 0, M, N, K, 1.0, K, N, 0.0, N);
-    tmp_pool.reset();
+    gemm_cpu(kargs, vout, nvregs, tmp_pool, 0, 0, M, N, K, 1.0, lda, ldb, 0.0, ldc);
     col2im_cpu(vout, nvregs, tmp_pool, oc, oh, ow, kh, stride_h, t_pad);
     ret();
 }

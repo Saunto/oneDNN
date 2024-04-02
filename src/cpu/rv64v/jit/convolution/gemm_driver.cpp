@@ -9,12 +9,23 @@
 #include <iostream>
 #include "cpu/rv64v/jit/convolution/gemm_driver.hpp"
 #include "cpu/rv64v/jit/convolution/gemm_kernel.hpp"
+#include <iostream>
+#include <cstdint>
 
 namespace dnnl {
 namespace impl {
 namespace cpu {
 namespace rv64 {
 namespace gemm {
+
+static float execution = 0;
+// CPU engine implementation
+
+uint64_t read_instret() {
+    uint64_t instret;
+    asm volatile("csrr %0, instret" : "=r"(instret));
+    return instret;
+}
 struct schedule_factory_t {
     convolution_schedule_t &sched;
     kernel_traits_t *traits;
@@ -221,13 +232,11 @@ void schedule_iteration(schedule_factory_t &f,
         ++s.NJ;
         if (debugmode()) {
             char name[32];
-            snprintf(name, 32, "kernel_%ld.asm", id);
+            snprintf(name, 32, "kernel_%ld.bin", id);
             dump_jit_code_to_file(s.handles[id], name);
             printf("Creating kernel %s (%p) with traits: ",
                 name, s.handles[id]->get());
-            printf("erbw: %d ", t.erbw);
-            printf("pad: (T:%d, B:%d, L:%d, R:%d)\n",
-                t.rbpadT, t.rbpadB, t.rbpadL, t.rbpadR);
+           
         }
     }
     handle = s.handles[id];
@@ -248,7 +257,6 @@ void schedule_iteration(schedule_factory_t &f,
     }
     s.calls[s.N] = handle->get<convolution_schedule_t::pkernel_t>();
     s.args[s.N].load_partials = a.load_partials;
-    //s.args[s.N].bwdd_zrow = a.bwdd_zrow;
     s.args[s.N].h_loop_size = a.h_loop_size;
     s.args[s.N].w_loop_size = a.w_loop_size;
     s.args[s.N].vlen = a.vlen;
@@ -257,72 +265,7 @@ void schedule_iteration(schedule_factory_t &f,
     s.args[s.N].wei = a.wei;
     s.args[s.N].bias = a.bias;
     ++s.N;
-    if (debugmode()) {
-        printf("[iteration] ukernel: %p, ", s.calls[s.N-1]);
-        printf("load_partials: %ld, ", a.load_partials);
-        //printf("bwdd_zrow: %ld, ", a.bwdd_zrow);
-        printf("h_loop_size: %ld, ", a.h_loop_size);
-        printf("w_loop_size: %ld, ", a.w_loop_size);
-        printf("vlen: %ld, ", a.vlen);
-        printf("dst_off: %ld, ", a.dst);
-        printf("src_off: %ld, ", a.src);
-        printf("wei_off: %ld, ", a.wei);
-        printf("bia_off: %ld\n", a.bias);
-    }
-}
 
-void schedule_fwdd(convolution_schedule_t &s) {
-    auto factory = schedule_factory_t(s);
-    auto &cfg = s.cfg;
-    for (int ocb = 0; ocb < cfg.oc/cfg.ocb; ++ocb)
-    for (int ic = 0; ic < cfg.ic; ic += cfg.k_c)
-    for (int kh = 0; kh < cfg.kh; kh += cfg.k_h)
-    for (int kw = 0; kw < cfg.kw; kw += cfg.k_w)
-    for (int oh = 0; oh < cfg.oh; ++oh)
-    for (int ow = 0; ow < cfg.ow; ow += cfg.rbw) {
-        int ih = oh * cfg.stride_h - cfg.t_pad + kh;
-        int iw = ow * cfg.stride_w - cfg.l_pad + kw;
-        int const icb = ic / cfg.icb;
-        int const icbl = ic % cfg.icb;
-        int const w_icb = ic / cfg.w_icb;
-        int const w_icbl = ic % cfg.w_icb;
-
-        kernel_traits_t t;
-        t.erbc = 1;
-        t.erbw = nstl::min(cfg.rbw, cfg.ow - ow);
-
-        int const last_ih = ih + cfg.k_h;
-        int const last_iw = iw + t.erbw * cfg.stride_w + cfg.k_w - 1;
-        int const t_pad_overlap = ih > 0 ? 0 : -ih;
-        int const l_pad_overlap = iw > 0 ? 0 : -iw;
-        int const r_pad_overlap = last_iw < cfg.iw ? 0 : last_iw - cfg.iw;
-        int const b_pad_overlap = last_ih < cfg.ih ? 0 : last_ih - cfg.ih;
-
-        t.rbpadT = t_pad_overlap;
-        t.rbpadL = l_pad_overlap;
-        t.rbpadB = b_pad_overlap;
-        t.rbpadR = r_pad_overlap;
-
-        convolution_schedule_t::precalculated_args a;
-        a.load_partials = ic > 0;
-        if (cfg.k_h <= cfg.t_pad && oh == 0)
-            a.load_partials |= kh > 1 || kw;
-        else
-            a.load_partials |= kh || kw;
-        //a.bwdd_zrow = false;
-        a.vlen = nstl::min(cfg.vlen, cfg.oc - ocb * cfg.ocb);
-        a.h_loop_size = cfg.k_h - (t_pad_overlap + b_pad_overlap);
-        a.w_loop_size = cfg.k_w;
-        a.dst = ((ocb * cfg.oh + oh) * cfg.ow + ow) * cfg.ocb;
-        a.src = (((icb * cfg.ih + ih) * cfg.iw + iw) * cfg.icb) + icbl;
-        a.wei = ocb * cfg.ic * cfg.kh * cfg.kw * cfg.w_ocb
-            + ((((w_icb * cfg.kh + kh) * cfg.kw + kw)
-                * cfg.w_icb + w_icbl) * cfg.w_ocb);
-        a.bias = ocb * cfg.ocb;
-        
-        if (a.h_loop_size * a.w_loop_size > 0)
-            schedule_iteration(factory, t, a);
-    }
 }
 
 
@@ -646,6 +589,10 @@ void free_schedule(convolution_schedule_t &s) {
 
 void call_schedule(const convolution_schedule_t &s, int i, int mb,
 const float *dst, const float *src, const float *wei, const float *bias, const float *inter, const float *inter2) {
+    //std::cout << "Executing layer " << i + 1 << std::endl;
+    uint64_t start_instret = read_instret();
+
+
     std::cout << "call_schedule" << std::endl;
     convolution_schedule_t::jit_conv_kernel_args_t kargs;
     convolution_schedule_t::precalculated_args &args = s.args[i];
@@ -661,6 +608,9 @@ const float *dst, const float *src, const float *wei, const float *bias, const f
     kargs.load_partials = args.load_partials
         || (s.cfg.prop_kind == prop_kind::backward_weights ? mb > 0 : false);
     s.calls[i](kargs);
+    uint64_t end_instret = read_instret();
+
+    std::cout << "Instructions executed: " << (end_instret - start_instret) << std::endl;
 }
 
 } // namespace gemm

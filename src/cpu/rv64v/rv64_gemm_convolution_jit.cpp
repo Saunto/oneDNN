@@ -31,7 +31,6 @@ rv64_gemm_convolution_jit_fwd_t<T>::do_execute(const exec_ctx_t &ctx) const {
     
     float* inter = new float[size](); 
     float* inter2 = new float[size]();
-    
     call_schedule(schedule, 0, 0, dst, src, wei, bias, inter, inter2);
 
     delete[] inter;

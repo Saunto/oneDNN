@@ -1708,6 +1708,9 @@ protected:
     }
 
     // Vector Permutation Instructions (TODO)
+    void vslideup_vx(vr_t vd, vr_t vs2, gpr_t rs1, vmask_t vm = vmask::unmasked) {
+        push(rvj_vslideup_vx(vd, vs2, rs1));
+    }
     // Vector Integer Scalar Move Instructions
     void vmv_xs(gpr_t vd, vr_t vs2) {
         push(rvj_vmv_xs(vd, vs2));

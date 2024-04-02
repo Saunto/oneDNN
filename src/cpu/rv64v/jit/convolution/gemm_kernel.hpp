@@ -57,10 +57,13 @@ private:
     void im2col_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int channels,  int height,  int width,int ksize,  int stride, int pad);
     void col2im_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int channels, int height, int width, int ksize, int stride, int pad);
     void gemm_nn_noalpha(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int M, int N, int K, float ALPHA, int lda, int ldb, int ldc);
-    void gemm_nn_original(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int M, int N, int K, float ALPHA, int lda,int ldb, int ldc);
-    void gemm_nn_noalpha_unroll163loops(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int M, int N, int K, float ALPHA, int lda, int ldb, int ldc);
+    void gemm_nn_original(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int M, int N, int K, float ALPHA, int A_offset, int lda, int B_offset, int ldb, int C_offset, int ldc);
+    void gemm_nn_noalpha_unroll163loops(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int M, int N, int K, float ALPHA, int A_offset, int lda, int B_offset, int ldb, int C_offset, int ldc, int unroll);
 
-    void gemm_cpu(rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int TA, int TB, int M, int N, int K, float ALPHA, int lda, int ldb, float BETA, int ldc);
+    void blocked_gemm(convolution_schedule_t::jit_conv_kernel_args_t kargs, rvjit::vr_t *vout, int nvregs, register_pool_t &tmp, int M, int N, int K, float ALPHA,
+        int lda, int ldb, int ldc, int block_size_M, int block_size_N, int block_size_K);
+
+    void gemm_cpu(convolution_schedule_t::jit_conv_kernel_args_t kargs, rvjit::vr_t *vout, int nvregs, register_pool_t &tmp,int TA, int TB, int M, int N, int K, float ALPHA, int lda, int ldb, float BETA, int ldc);
 
     template <typename data_t> dnnl_status_t gemm(const char *transa_, const char *transb_,
     const dim_t *M_, const dim_t *N_, const dim_t *K_, const data_t *alpha_,

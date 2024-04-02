@@ -691,6 +691,7 @@ rvj_instr rvj_vmslt_vx(REGV vd, REGV vs1, REGV vs2);
 rvj_instr rvj_vmseq_vv(REGV vd, REGV vs1, REGV vs2);
 rvj_instr rvj_vmsgt_vx(REGV vd, REGV vs1, REGV vs2);
 // Vector Permutation Instructions (TODO)
+rvj_instr rvj_vslideup_vx(REGV vd, REGV vs2, REGX rs1);
 // Vector Integer Scalar Move Instructions
 rvj_instr rvj_vmv_xs(REGX vd, REGV vs2);
 rvj_instr rvj_vmv_sx(REGV vd, REGX rs1);
